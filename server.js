@@ -8,17 +8,15 @@
 const express = require("express");
 const fs = require("fs");
 const path = require('path');
-
-// 1. D'abord on crée l'application Express
-const app = express();
-
-// Indique à Express de servir le dossier "public"
-app.use(express.static(path.join(__dirname, 'public')));
 const crypto = require("crypto");
 const multer = require("multer");
 const PDFDocument = require("pdfkit");
 
+// 1. Déclarer l'application Express UNE SEULE FOIS
 const app = express();
+
+// 2. Servir le dossier public
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ----------------------------------------------------------------------------
 // 1) CONFIGURATION
