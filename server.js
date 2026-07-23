@@ -21,37 +21,11 @@ const app = express();
 // 2. Servir le dossier public
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ===================================================
-// CONFIGURATION BREVO (API HTTP Directe)
-// ===================================================
-
-async function envoyerEmail(destinataire, sujet, contenuHTML) {
-    try {
-        const response = await axios.post('https://api.brevo.com/v3/smtp/email', {
-            sender: { 
-                name: process.env.SENDER_NAME || "ALIPAFRIC", 
-                email: process.env.SENDER_EMAIL 
-            },
-            to: [{ email: destinataire }],
-            subject: sujet,
-            htmlContent: contenuHTML
-        }, {
-            headers: {
-                'accept': 'application/json',
-                'api-key': process.env.BREVO_API_KEY,
-                'content-type': 'application/json'
-            }
-        });
-
-        console.log("E-mail envoyé avec succès ! ID :", response.data.messageId);
-        return true;
-    } catch (error) {
-        console.error("Erreur d'envoi Brevo :", error.response ? error.response.data : error.message);
-        return false;
-    }
-}
 // ============================================================================
 // FONCTIONS D'ENVOI D'E-MAILS
+// (la fonction envoyerEmail elle-même — celle qui appelle Brevo — est
+// définie plus bas dans ce fichier, juste avant le démarrage du serveur ;
+// grâce au "hoisting" de JavaScript, elle est bien disponible ici aussi.)
 // ============================================================================
 
 async function envoyerEmailBienvenue(email, pseudo) {
@@ -64,15 +38,8 @@ async function envoyerEmailBienvenue(email, pseudo) {
   return envoyerEmail(email, sujet, contenuHtml);
 }
 
-async function envoyerEmailReinitialisation(email, code) {
-  const sujet = `Réinitialisation de votre mot de passe — ${CONFIG.NOM_SITE}`;
-  const contenuHtml = `
-    <h2>Code de réinitialisation</h2>
-    <p>Voici votre code de réinitialisation : <b style="font-size:20px; color:#2563EB;">${code}</b></p>
-    <p>Ce code expire dans 15 minutes.</p>
-  `;
-  return envoyerEmail(email, sujet, contenuHtml);
-}
+// envoyerEmailReinitialisation est définie plus bas, juste à côté de la
+// route /mot-de-passe-oublie qui l'utilise.
 
 async function envoyerEmailTransaction(email, sujet, message) {
   const contenuHtml = `
@@ -97,8 +64,11 @@ const CONFIG = {
   PORT: process.env.PORT || 3000,
 
   // ⚠️ Changez ces identifiants avant de mettre le site en ligne.
-  ADMIN_IDENTIFIANT: "admin",
-  ADMIN_MOT_DE_PASSE: "ChangezMoi123!",
+  // ⚠️ Identifiants admin : définis dans le fichier .env (jamais dans ce fichier).
+  // Voir ADMIN_IDENTIFIANT et ADMIN_MOT_DE_PASSE dans .env — valeurs de secours
+  // ci-dessous UNIQUEMENT pour que le site démarre si .env n'est pas configuré.
+  ADMIN_IDENTIFIANT: process.env.ADMIN_IDENTIFIANT || "admin",
+  ADMIN_MOT_DE_PASSE: process.env.ADMIN_MOT_DE_PASSE || "ChangezMoi123!",
 
   CONTACT_EMAIL: "support@alipafric.com",
   CONTACT_WHATSAPP: "22892908235",
@@ -754,7 +724,6 @@ app.post("/inscription", (req, res) => {
     nom: null,
     prenom: null,
     telephone: null,
-    telephoneVerifie: false,
     pieceIdentite: null,
     statutVerification: "profil_incomplet",
     raisonRefus: null,
@@ -860,7 +829,7 @@ function pageMotDePasseOublie({ erreurGlobal = null } = {}) {
   return page("Mot de passe oublié", contenu);
 }
 app.get("/mot-de-passe-oublie", (req, res) => res.send(pageMotDePasseOublie()));
-app.post("/mot-de-passe-oublie", (req, res) => {
+app.post("/mot-de-passe-oublie", async (req, res) => {
   const email = (req.body.email || "").trim();
   const u = utilisateurs.find((x) => x.identifiant.toLowerCase() === email.toLowerCase());
   // Message identique que le compte existe ou non, pour ne pas révéler quels e-mails sont inscrits.
@@ -870,15 +839,41 @@ app.post("/mot-de-passe-oublie", (req, res) => {
   u.codeReinitialisation = genererCode();
   u.codeReinitialisationExpire = Date.now() + 15 * 60 * 1000; // valable 15 minutes
   sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
-  // ➕ AJOUT : Envoi du code par e-mail
-  envoyerEmailReinitialisation(u.identifiant, u.codeReinitialisation)
-    .catch((err) => console.error("Erreur e-mail réinitialisation :", err.message));
-  res.redirect(`/reinitialiser-mot-de-passe?email=${encodeURIComponent(u.identifiant)}`);
+  // 2. On APPELLE la fonction pour envoyer le mail
+  await envoyerEmailReinitialisation(u.identifiant, u.codeReinitialisation);
+
+  // Le compte existe et l'e-mail est parti : direction la page où saisir le code + le nouveau mot de passe.
+  return res.redirect(`/reinitialiser-mot-de-passe?email=${encodeURIComponent(u.identifiant)}`);
 });
+  // Fonction pour envoyer l'e-mail de réinitialisation avec le code en grand
+async function envoyerEmailReinitialisation(destinataire, code) {
+  const contenuMail = `
+    <p>Bonjour,</p>
+    <p>Vous avez demandé la réinitialisation du mot de passe pour le compte <b>${destinataire}</b>.</p>
+    <p>Voici votre code de vérification à saisir sur le site :</p>
+    
+    <!-- Code de vérification mis en valeur -->
+    <div style="text-align: center; margin: 30px 0;">
+      <span style="background-color: #f0f4f8; color: #2b5b9a; font-size: 32px; font-weight: bold; letter-spacing: 8px; padding: 14px 28px; border-radius: 6px; border: 2px dashed #2b5b9a; display: inline-block;">
+        ${code}
+      </span>
+    </div>
+
+    <p style="font-size: 13px; color: #666666;">Ce code est confidentiel. Ne le partagez avec personne.</p>
+  `;
+
+  return await envoyerEmail(
+    destinataire,
+    "Réinitialisation de votre mot de passe - ALIPAFRIC",
+    contenuMail,
+    "Code de réinitialisation du mot de passe" // Titre principal dans le mail
+  );
+}
 
 function pageReinitialiserMotDePasse({ email = "", code = "", erreurGlobal = null, erreurMdp = null, codeDemo = null } = {}) {
   const contenu = `
     <h1>Réinitialiser le mot de passe</h1>
+    <p class="souligne">Un code de vérification vient de vous être envoyé par e-mail${email ? ` à ${email}` : ""}.</p>
     ${codeDemo ? `<div class="banniere banniere-attente">Code de démonstration (pas de service e-mail réel connecté) : <b style="font-size:18px;">${codeDemo}</b></div>` : ""}
     ${erreurGlobal ? `<div class="banniere banniere-erreur">${erreurGlobal}</div>` : ""}
     <div class="carte">
@@ -1033,15 +1028,12 @@ app.get("/compte/profil", exigerConnexion, exigerEmailVerifie, (req, res) => {
   } else {
     const badgeClasse = u.statutVerification === "verifie" ? "badge-verifie" : "badge-attente";
     const badgeTexte = u.statutVerification === "verifie" ? "Vérifié" : "En attente de vérification";
-    const badgeTel = u.telephoneVerifie
-      ? `<span class="badge badge-verifie">Téléphone vérifié</span>`
-      : `<span class="badge badge-attente">Téléphone non vérifié</span>`;
     blocIdentite = `
       <div class="carte">
         <h2>Informations personnelles <span class="badge ${badgeClasse}">${badgeTexte}</span></h2>
         <div class="ligne"><span>Prénom</span><b>${u.prenom}</b></div>
         <div class="ligne"><span>Nom</span><b>${u.nom}</b></div>
-        <div class="ligne"><span>Téléphone</span><b>${u.telephone} ${badgeTel}</b></div>
+        <div class="ligne"><span>Téléphone</span><b>${u.telephone}</b></div>
         <div class="ligne"><span>Pièce d'identité</span><b>${u.statutVerification === "verifie" ? "Vérifiée" : "Envoyée"}</b></div>
       </div>`;
   }
@@ -1052,12 +1044,8 @@ app.get("/compte/profil", exigerConnexion, exigerEmailVerifie, (req, res) => {
     ${blocIdentite}
     <div class="carte">
       <h2>Adresse e-mail</h2>
-      <div class="ligne"><span>E-mail actuel</span><b>${u.identifiant}</b></div>
-      <form method="POST" action="/compte/profil/changer-email">
-        <label for="nouvelEmail">Nouvel e-mail</label>
-        <input type="email" id="nouvelEmail" name="nouvelEmail" required>
-        <button type="submit" class="fantome">Changer mon e-mail</button>
-      </form>
+      <div class="ligne"><span>E-mail vérifié</span><b>${u.identifiant}</b></div>
+      <p class="souligne" style="margin-top:10px;">Pour des raisons de sécurité, l'adresse e-mail d'un compte ne peut pas être modifiée après vérification. Contactez le support si besoin.</p>
     </div>
     <div class="carte">
       <h2>Sécurité</h2>
@@ -1091,89 +1079,19 @@ app.post("/compte/profil", exigerConnexion, exigerEmailVerifie, uploadIdentite.s
   u.prenom = prenom;
   u.telephone = `${indicatif} ${numeroTelephone}`;
   u.pieceIdentite = piece.filename;
-  u.telephoneVerifie = false;
-  u.codeTelephone = genererCode();
   u.raisonRefus = null;
-  sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
-  res.redirect("/compte/profil/verifier-telephone");
-});
-
-app.get("/compte/profil/verifier-telephone", exigerConnexion, exigerEmailVerifie, (req, res) => {
-  const u = req.utilisateur;
-  if (!u.codeTelephone) return res.redirect("/compte/profil");
-  const contenu = `
-    ${entete("profil", u)}
-    <h1>Confirmez votre téléphone</h1>
-    <p class="souligne">Un code a été "envoyé" par SMS à ${u.telephone}.</p>
-    <div class="banniere banniere-attente">Code de démonstration (pas de service SMS réel connecté) : <b style="font-size:18px;">${u.codeTelephone}</b></div>
-    <div class="carte">
-      <form method="POST" action="/compte/profil/verifier-telephone">
-        <label for="code">Code à 6 chiffres</label>
-        <input type="text" id="code" name="code" maxlength="6" required>
-        <button type="submit">Confirmer</button>
-      </form>
-    </div>
-    <a class="lien-discret" href="/compte/profil/verifier-telephone/renvoyer">Renvoyer un code</a>
-  `;
-  res.send(page("Confirmer le téléphone", contenu));
-});
-app.post("/compte/profil/verifier-telephone", exigerConnexion, exigerEmailVerifie, (req, res) => {
-  const u = req.utilisateur;
-  if (req.body.code !== u.codeTelephone) {
-    return res.status(400).send(page("Erreur", `<h1>Code incorrect</h1><a href="/compte/profil/verifier-telephone">← Réessayer</a>`));
-  }
-  u.telephoneVerifie = true;
-  u.codeTelephone = null;
+  // Le numéro de téléphone n'est pas vérifié par SMS : il est simplement
+  // renseigné. C'est la pièce d'identité qui est vérifiée par l'admin.
   u.statutVerification = "en_attente";
   sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
   res.redirect("/compte");
 });
-app.get("/compte/profil/verifier-telephone/renvoyer", exigerConnexion, exigerEmailVerifie, (req, res) => {
-  if (req.utilisateur.codeTelephone) req.utilisateur.codeTelephone = genererCode();
-  sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
-  res.redirect("/compte/profil/verifier-telephone");
-});
 
-app.post("/compte/profil/changer-email", exigerConnexion, exigerEmailVerifie, (req, res) => {
-  const { nouvelEmail } = req.body;
-  if (!nouvelEmail) return res.redirect("/compte/profil");
-  if (utilisateurs.some((x) => x.identifiant.toLowerCase() === nouvelEmail.toLowerCase())) {
-    return res.status(400).send(page("Erreur", `<h1>Cet e-mail est déjà utilisé</h1><a href="/compte/profil">← Retour</a>`));
-  }
-  req.utilisateur.emailEnAttente = nouvelEmail;
-  req.utilisateur.codeNouvelEmail = genererCode();
-  sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
-  res.redirect("/compte/profil/confirmer-nouvel-email");
-});
-app.get("/compte/profil/confirmer-nouvel-email", exigerConnexion, exigerEmailVerifie, (req, res) => {
-  const u = req.utilisateur;
-  if (!u.emailEnAttente) return res.redirect("/compte/profil");
-  const contenu = `
-    ${entete("profil", u)}
-    <h1>Confirmez votre nouvel e-mail</h1>
-    <p class="souligne">Un code a été "envoyé" à ${u.emailEnAttente}.</p>
-    <div class="banniere banniere-attente">Code de démonstration : <b style="font-size:18px;">${u.codeNouvelEmail}</b></div>
-    <div class="carte">
-      <form method="POST" action="/compte/profil/confirmer-nouvel-email">
-        <label for="code">Code à 6 chiffres</label>
-        <input type="text" id="code" name="code" maxlength="6" required>
-        <button type="submit">Confirmer</button>
-      </form>
-    </div>
-  `;
-  res.send(page("Confirmer le nouvel e-mail", contenu));
-});
-app.post("/compte/profil/confirmer-nouvel-email", exigerConnexion, exigerEmailVerifie, (req, res) => {
-  const u = req.utilisateur;
-  if (req.body.code !== u.codeNouvelEmail) {
-    return res.status(400).send(page("Erreur", `<h1>Code incorrect</h1><a href="/compte/profil/confirmer-nouvel-email">← Réessayer</a>`));
-  }
-  u.identifiant = u.emailEnAttente;
-  u.emailEnAttente = null;
-  u.codeNouvelEmail = null;
-  sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
-  res.redirect("/compte/profil");
-});
+// La vérification du numéro de téléphone par SMS a été retirée : le numéro
+// est simplement renseigné dans le profil, sans confirmation par code.
+
+// L'e-mail est vérifié une seule fois à l'inscription et ne peut plus être
+// changé ensuite (routes de changement d'e-mail volontairement supprimées).
 
 app.post("/compte/profil/mot-de-passe", exigerConnexion, exigerEmailVerifie, (req, res) => {
   const { nouveauMdp, confirmerMdp } = req.body;
@@ -1286,6 +1204,7 @@ app.post("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exiger
 
         <label for="numeroExpediteur" id="labelNumeroExpediteur">Numéro ou compte utilisé pour le dépôt</label>
         <input type="text" id="numeroExpediteur" name="numeroExpediteur" placeholder="Sélectionnez d'abord un moyen de paiement" required>
+        <div class="avertissement">⚠️ Important : le numéro Mobile Money, le compte bancaire ou le compte PI-SPI utilisé pour cette transaction doit être enregistré au <b>même nom</b> que votre profil ${CONFIG.NOM_SITE}. En cas de nom différent, l'opération peut échouer.</div>
 
         <button type="submit">Continuer</button>
       </form>
@@ -1765,7 +1684,7 @@ app.get("/admin/utilisateurs", exigerAdmin, (req, res) => {
       ? `<a href="/uploads/identite/${u.pieceIdentite}" target="_blank">📄 PDF</a>`
       : `<a href="/uploads/identite/${u.pieceIdentite}" target="_blank"><img class="miniature" src="/uploads/identite/${u.pieceIdentite}"></a>`;
     const infos = u.nom
-      ? `${u.prenom} ${u.nom}<br><small style="color:var(--texte-att);">${u.telephone} — ${u.telephoneVerifie ? "✔ tél. vérifié" : "✘ tél. non vérifié"}</small>`
+      ? `${u.prenom} ${u.nom}<br><small style="color:var(--texte-att);">${u.telephone}</small>`
       : `<em>${u.pseudo} (profil incomplet)</em>`;
     const actions = u.statutVerification === "en_attente"
       ? `<form style="display:inline" method="POST" action="/admin/utilisateurs/${u.id}/verifier"><button class="mini-bouton ok">Vérifier</button></form>
@@ -1908,5 +1827,110 @@ app.use((err, req, res, next) => {
 // ============================================================================
 app.listen(CONFIG.PORT, () => {
   console.log(`✅ ${CONFIG.NOM_SITE} lancé sur http://localhost:${CONFIG.PORT}`);
-  console.log(`   Admin : http://localhost:${CONFIG.PORT}/admin/connexion (${CONFIG.ADMIN_IDENTIFIANT} / ${CONFIG.ADMIN_MOT_DE_PASSE})`);
+  if (!process.env.ADMIN_MOT_DE_PASSE || CONFIG.ADMIN_MOT_DE_PASSE === "ChangezMoi123!") {
+    console.warn("⚠️  ATTENTION : mot de passe admin par défaut détecté. Définissez ADMIN_IDENTIFIANT et ADMIN_MOT_DE_PASSE dans votre fichier .env avant de mettre le site en ligne.");
+  } else {
+    console.log(`   Admin : http://localhost:${CONFIG.PORT}/admin/connexion (identifiant/mot de passe définis dans .env)`);
+  }
 });
+// Fonction d'envoi d'e-mail unique et réutilisable (utilisée par
+// envoyerEmailBienvenue, envoyerEmailReinitialisation et envoyerEmailTransaction).
+async function envoyerEmail(destinataire, sujet, contenu, titre = sujet, bouton = null) {
+  // 1. Préparation du bouton HTML
+  const boutonHtml = bouton ? `
+    <table border="0" cellspacing="0" cellpadding="0" align="center" style="margin: 30px auto;">
+      <tr>
+        <td align="center" style="border-radius: 5px; background-color: #3bb54a;">
+          <a href="${bouton.lien}" target="_blank" style="font-size: 15px; font-family: Arial, sans-serif; color: #ffffff; text-decoration: none; padding: 13px 25px; border-radius: 5px; display: inline-block; font-weight: bold;">
+            ${bouton.texte}
+          </a>
+        </td>
+      </tr>
+    </table>
+  ` : '';
+
+  // 2. Préparation du template complet
+  const htmlComplet = `
+  <!DOCTYPE html>
+  <html lang="fr">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  </head>
+  <body style="margin: 0; padding: 0; background-color: #f4f6f8; font-family: Arial, Helvetica, sans-serif; color: #333333;">
+    <table align="center" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 600px; margin: 30px auto; background-color: #ffffff; border-radius: 6px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+      
+      <!-- BANDEAU BLEU -->
+      <tr>
+        <td style="background-color: #2b5b9a; padding: 18px 25px;">
+          <table width="100%" border="0" cellspacing="0" cellpadding="0">
+            <tr>
+              <td align="left" style="color: #ffffff; font-size: 22px; font-weight: bold; letter-spacing: 0.5px;">
+                ALIPAFRIC
+              </td>
+              <td align="right" style="color: #ffffff; font-size: 13px;">
+                Notification
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+
+      <!-- CONTENU -->
+      <tr>
+        <td style="padding: 35px 30px;">
+          <h2 style="color: #222222; font-size: 20px; font-weight: normal; margin-top: 0; margin-bottom: 20px; line-height: 1.4;">
+            ${titre}
+          </h2>
+          
+          <div style="font-size: 14px; line-height: 1.6; color: #444444; margin-bottom: 25px;">
+            ${contenu}
+          </div>
+
+          ${boutonHtml}
+
+          <p style="font-size: 13px; line-height: 1.5; color: #666666; margin-top: 30px; margin-bottom: 0;">
+            Si vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail en toute sécurité.
+          </p>
+        </td>
+      </tr>
+
+      <!-- PIED DE PAGE -->
+      <tr>
+        <td style="background-color: #f8f9fa; padding: 15px 30px; text-align: center; border-top: 1px solid #eeeeee; font-size: 12px; color: #888888;">
+          © ALIPAFRIC - Plateforme sécurisée de recharge
+        </td>
+      </tr>
+
+    </table>
+  </body>
+  </html>
+  `;
+
+  // 3. Envoi de l'e-mail via Brevo
+  try {
+    const response = await axios.post(
+      'https://api.brevo.com/v3/smtp/email',
+      {
+        sender: { 
+          name: process.env.SENDER_NAME || "ALIPAFRIC", 
+          email: process.env.SENDER_EMAIL 
+        },
+        to: [{ email: destinataire }],
+        subject: sujet,
+        htmlContent: htmlComplet
+      },
+      {
+        headers: {
+          'api-key': process.env.BREVO_API_KEY,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    console.log(`✉️ Email envoyé avec succès à : ${destinataire}`);
+    return response.data;
+      } catch (error) {
+    console.error("❌ Erreur lors de l'envoi de l'e-mail :", error.response?.data || error.message);
+  }
+  };
