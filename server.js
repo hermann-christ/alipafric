@@ -9,6 +9,9 @@ const express = require("express");
 const fs = require("fs");
 const path = require('path');
 
+// 1. D'abord on crée l'application Express
+const app = express();
+
 // Indique à Express de servir le dossier "public"
 app.use(express.static(path.join(__dirname, 'public')));
 const crypto = require("crypto");
