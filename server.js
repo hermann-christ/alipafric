@@ -7,7 +7,10 @@
 
 const express = require("express");
 const fs = require("fs");
-const path = require("path");
+const path = require('path');
+
+// Indique à Express de servir le dossier "public"
+app.use(express.static(path.join(__dirname, 'public')));
 const crypto = require("crypto");
 const multer = require("multer");
 const PDFDocument = require("pdfkit");
