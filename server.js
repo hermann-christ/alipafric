@@ -5,6 +5,9 @@
 //  Toujours ultra léger : Express + fichiers JSON locaux + PDFKit.
 // ============================================================================
 
+require('dotenv').config();
+
+const axios = require('axios');
 const express = require("express");
 const fs = require("fs");
 const path = require('path');
@@ -17,6 +20,70 @@ const app = express();
 
 // 2. Servir le dossier public
 app.use(express.static(path.join(__dirname, 'public')));
+
+// ===================================================
+// CONFIGURATION BREVO (API HTTP Directe)
+// ===================================================
+
+async function envoyerEmail(destinataire, sujet, contenuHTML) {
+    try {
+        const response = await axios.post('https://api.brevo.com/v3/smtp/email', {
+            sender: { 
+                name: process.env.SENDER_NAME || "ALIPAFRIC", 
+                email: process.env.SENDER_EMAIL 
+            },
+            to: [{ email: destinataire }],
+            subject: sujet,
+            htmlContent: contenuHTML
+        }, {
+            headers: {
+                'accept': 'application/json',
+                'api-key': process.env.BREVO_API_KEY,
+                'content-type': 'application/json'
+            }
+        });
+
+        console.log("E-mail envoyé avec succès ! ID :", response.data.messageId);
+        return true;
+    } catch (error) {
+        console.error("Erreur d'envoi Brevo :", error.response ? error.response.data : error.message);
+        return false;
+    }
+}
+// ============================================================================
+// FONCTIONS D'ENVOI D'E-MAILS
+// ============================================================================
+
+async function envoyerEmailBienvenue(email, pseudo) {
+  const sujet = `Bienvenue sur ${CONFIG.NOM_SITE} !`;
+  const contenuHtml = `
+    <h2>Bienvenue ${pseudo} !</h2>
+    <p>Votre compte a été créé avec succès sur <b>${CONFIG.NOM_SITE}</b>.</p>
+    <p>Vous pouvez dès à présent effectuer vos demandes de recharge Alipay en toute sécurité.</p>
+  `;
+  return envoyerEmail(email, sujet, contenuHtml);
+}
+
+async function envoyerEmailReinitialisation(email, code) {
+  const sujet = `Réinitialisation de votre mot de passe — ${CONFIG.NOM_SITE}`;
+  const contenuHtml = `
+    <h2>Code de réinitialisation</h2>
+    <p>Voici votre code de réinitialisation : <b style="font-size:20px; color:#2563EB;">${code}</b></p>
+    <p>Ce code expire dans 15 minutes.</p>
+  `;
+  return envoyerEmail(email, sujet, contenuHtml);
+}
+
+async function envoyerEmailTransaction(email, sujet, message) {
+  const contenuHtml = `
+    <h2>Mise à jour de votre transaction</h2>
+    <p>${message}</p>
+    <hr>
+    <p><small>Connectez-vous à votre espace client sur ${CONFIG.NOM_SITE} pour plus de détails.</small></p>
+  `;
+  return envoyerEmail(email, sujet, contenuHtml);
+}
+// ===================================================
 
 // ----------------------------------------------------------------------------
 // 1) CONFIGURATION
@@ -726,6 +793,9 @@ app.post("/confirmer-email", exigerConnexion, (req, res) => {
   u.emailVerifie = true;
   u.codeEmail = null;
   sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
+  // ➕ AJOUT : L'e-mail de bienvenue part MAINTENANT que l'e-mail est confirmé
+  envoyerEmailBienvenue(u.identifiant, u.pseudo || "Client")
+    .catch((err) => console.error("Erreur e-mail bienvenue :", err.message))
   res.redirect("/compte");
 });
 app.get("/confirmer-email/renvoyer", exigerConnexion, (req, res) => {
@@ -800,6 +870,9 @@ app.post("/mot-de-passe-oublie", (req, res) => {
   u.codeReinitialisation = genererCode();
   u.codeReinitialisationExpire = Date.now() + 15 * 60 * 1000; // valable 15 minutes
   sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
+  // ➕ AJOUT : Envoi du code par e-mail
+  envoyerEmailReinitialisation(u.identifiant, u.codeReinitialisation)
+    .catch((err) => console.error("Erreur e-mail réinitialisation :", err.message));
   res.redirect(`/reinitialiser-mot-de-passe?email=${encodeURIComponent(u.identifiant)}`);
 });
 
@@ -835,7 +908,7 @@ function pageReinitialiserMotDePasse({ email = "", code = "", erreurGlobal = nul
 app.get("/reinitialiser-mot-de-passe", (req, res) => {
   const email = req.query.email || "";
   const u = utilisateurs.find((x) => x.identifiant.toLowerCase() === email.toLowerCase());
-  res.send(pageReinitialiserMotDePasse({ email, codeDemo: u ? u.codeReinitialisation : null }));
+  res.send(pageReinitialiserMotDePasse({ email, }));
 });
 app.post("/reinitialiser-mot-de-passe", (req, res) => {
   const { email, code, motDePasse, confirmation } = req.body;
@@ -1452,6 +1525,12 @@ app.post("/compte/transactions/:reference/preuve-paiement", exigerConnexion, exi
   // La fiche interne n'est créée qu'après confirmation par l'admin (pas ici).
   sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
   ajouterNotification(t.utilisateurId, `Preuve de paiement reçue pour votre recharge de ${t.montantRMB} RMB. En attente de confirmation.`, t.reference);
+  // ➕ AJOUT : Envoi de l'e-mail de confirmation de réception
+  envoyerEmailTransaction(
+    t.identifiantUtilisateur,
+    `Preuve reçue — Commande ${t.reference}`,
+    `Nous avons bien reçu votre preuve de paiement pour la commande <b>${t.reference}</b> (${t.montantRMB} RMB). Notre équipe vérifie votre dépôt.`
+  ).catch((err) => console.error("Erreur e-mail preuve :", err.message));
   res.redirect(`/compte/transactions/${t.reference}`);
 });
 
@@ -1804,6 +1883,12 @@ app.post("/admin/transactions/:reference/confirmer-recharge", exigerAdmin, async
     sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
     ajouterNotification(t.utilisateurId, `Votre compte Alipay a été crédité de ${t.montantRMB} RMB ✔ Transaction terminée.`, t.reference);
   }
+  // ➕ AJOUT : E-mail de confirmation de recharge Alipay terminée
+    envoyerEmailTransaction(
+      t.identifiantUtilisateur,
+      `Recharge effectuée — Commande ${t.reference}`,
+      `Votre compte Alipay a été crédité de <b>${t.montantRMB} RMB</b> avec succès ! Votre reçu est désormais disponible sur votre espace client.`
+    ).catch((err) => console.error("Erreur e-mail recharge :", err.message));
   res.redirect("/admin/transactions");
 });
 

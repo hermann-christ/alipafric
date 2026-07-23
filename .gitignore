@@ -7,3 +7,4 @@ recus/
 fiches/
 .DS_Store
 *.log
+.env
