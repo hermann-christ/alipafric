@@ -254,7 +254,7 @@ function page(titre, contenuHTML, options = {}) {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${titre} — ${CONFIG.NOM_SITE}</title>
-<link rel="icon" type="image/png" href="/favicon.png">
+<link rel="icon" type="image/png" href="/favicon.png?v=3">
 <style>
   :root {
     --fond: #1B1120;
