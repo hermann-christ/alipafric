@@ -1,0 +1,9 @@
+node_modules/
+utilisateurs.json
+transactions.json
+notifications.json
+uploads/
+recus/
+fiches/
+.DS_Store
+*.log
