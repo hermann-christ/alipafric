@@ -140,7 +140,10 @@ async function connecterMongo() {
     return;
   }
   try {
-    const client = new MongoClient(MONGO_URI);
+    // family: 4 force la résolution DNS/connexion en IPv4. Sur certains
+    // hébergeurs (dont Render), la connexion en IPv6 vers MongoDB Atlas
+    // provoque une erreur "SSL alert number 80" — cette option la résout.
+    const client = new MongoClient(MONGO_URI, { family: 4 });
     await client.connect();
     db = client.db(); // utilise le nom de base présent dans l'URI (ex : .../alipafric)
     console.log("✅ Connecté à MongoDB Atlas — les données sont persistantes.");
