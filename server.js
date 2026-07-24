@@ -14,6 +14,7 @@ const path = require('path');
 const crypto = require("crypto");
 const multer = require("multer");
 const PDFDocument = require("pdfkit");
+const { MongoClient } = require("mongodb");
 
 // 1. Déclarer l'application Express UNE SEULE FOIS
 const app = express();
@@ -114,20 +115,75 @@ const FICHIER_UTILISATEURS = path.join(__dirname, "utilisateurs.json");
 const FICHIER_TRANSACTIONS = path.join(__dirname, "transactions.json");
 const FICHIER_NOTIFICATIONS = path.join(__dirname, "notifications.json");
 
-function chargerJSON(cheminFichier) {
+// Association "chemin de fichier local" -> "nom de collection MongoDB".
+// On garde les mêmes noms de constantes (FICHIER_UTILISATEURS, etc.) dans
+// tout le reste du fichier pour ne pas avoir à toucher aux dizaines
+// d'appels existants à sauvegarderJSON(FICHIER_X, tableauX).
+const NOM_COLLECTION = {
+  [FICHIER_UTILISATEURS]: "utilisateurs",
+  [FICHIER_TRANSACTIONS]: "transactions",
+  [FICHIER_NOTIFICATIONS]: "notifications",
+};
+
+// ----------------------------------------------------------------------------
+// Stockage des données : MongoDB Atlas si MONGO_URI est configuré (données
+// persistantes, survivent aux redéploiements), sinon fichiers JSON locaux
+// (pratique pour du développement rapide en local, mais NON persistant sur
+// un hébergeur comme Render).
+// ----------------------------------------------------------------------------
+const MONGO_URI = process.env.MONGO_URI;
+let db = null;
+
+async function connecterMongo() {
+  if (!MONGO_URI) {
+    console.warn("⚠️  MONGO_URI non défini : utilisation de fichiers JSON locaux (NON persistants sur Render). Voir .env.");
+    return;
+  }
+  try {
+    const client = new MongoClient(MONGO_URI);
+    await client.connect();
+    db = client.db(); // utilise le nom de base présent dans l'URI (ex : .../alipafric)
+    console.log("✅ Connecté à MongoDB Atlas — les données sont persistantes.");
+  } catch (erreur) {
+    console.error("❌ Échec de connexion à MongoDB :", erreur.message);
+    console.error("   Le site va démarrer avec des fichiers JSON locaux (non persistants) en attendant.");
+  }
+}
+
+async function chargerJSON(cheminFichier) {
+  if (db) {
+    try {
+      return await db.collection(NOM_COLLECTION[cheminFichier]).find({}).toArray();
+    } catch (erreur) {
+      console.error(`Erreur de lecture MongoDB (${NOM_COLLECTION[cheminFichier]}) :`, erreur.message);
+      return [];
+    }
+  }
   try {
     return JSON.parse(fs.readFileSync(cheminFichier, "utf-8"));
   } catch (erreur) {
     return [];
   }
 }
-function sauvegarderJSON(cheminFichier, donnees) {
+async function sauvegarderJSON(cheminFichier, donnees) {
+  if (db) {
+    try {
+      const collection = db.collection(NOM_COLLECTION[cheminFichier]);
+      await collection.deleteMany({});
+      if (donnees.length > 0) await collection.insertMany(donnees);
+    } catch (erreur) {
+      console.error(`Erreur d'écriture MongoDB (${NOM_COLLECTION[cheminFichier]}) :`, erreur.message);
+    }
+    return;
+  }
   fs.writeFileSync(cheminFichier, JSON.stringify(donnees, null, 2), "utf-8");
 }
 
-let utilisateurs = chargerJSON(FICHIER_UTILISATEURS);
-let transactions = chargerJSON(FICHIER_TRANSACTIONS);
-let notifications = chargerJSON(FICHIER_NOTIFICATIONS);
+// Tableaux remplis au démarrage par demarrerServeur() (voir tout en bas du
+// fichier), une fois la connexion MongoDB établie.
+let utilisateurs = [];
+let transactions = [];
+let notifications = [];
 
 function ajouterNotification(utilisateurId, message, reference) {
   notifications.push({
@@ -1825,14 +1881,27 @@ app.use((err, req, res, next) => {
 // ============================================================================
 // 17) DÉMARRAGE
 // ============================================================================
-app.listen(CONFIG.PORT, () => {
-  console.log(`✅ ${CONFIG.NOM_SITE} lancé sur http://localhost:${CONFIG.PORT}`);
-  if (!process.env.ADMIN_MOT_DE_PASSE || CONFIG.ADMIN_MOT_DE_PASSE === "ChangezMoi123!") {
-    console.warn("⚠️  ATTENTION : mot de passe admin par défaut détecté. Définissez ADMIN_IDENTIFIANT et ADMIN_MOT_DE_PASSE dans votre fichier .env avant de mettre le site en ligne.");
-  } else {
-    console.log(`   Admin : http://localhost:${CONFIG.PORT}/admin/connexion (identifiant/mot de passe définis dans .env)`);
-  }
-});
+async function demarrerServeur() {
+  // 1. Connexion à MongoDB (si configurée) AVANT toute autre chose.
+  await connecterMongo();
+
+  // 2. Chargement des données (depuis MongoDB, ou depuis les fichiers JSON
+  // locaux en secours) dans les tableaux utilisés partout dans le fichier.
+  utilisateurs = await chargerJSON(FICHIER_UTILISATEURS);
+  transactions = await chargerJSON(FICHIER_TRANSACTIONS);
+  notifications = await chargerJSON(FICHIER_NOTIFICATIONS);
+
+  // 3. Démarrage du serveur HTTP une fois les données prêtes.
+  app.listen(CONFIG.PORT, () => {
+    console.log(`✅ ${CONFIG.NOM_SITE} lancé sur http://localhost:${CONFIG.PORT}`);
+    if (!process.env.ADMIN_MOT_DE_PASSE || CONFIG.ADMIN_MOT_DE_PASSE === "ChangezMoi123!") {
+      console.warn("⚠️  ATTENTION : mot de passe admin par défaut détecté. Définissez ADMIN_IDENTIFIANT et ADMIN_MOT_DE_PASSE dans votre fichier .env avant de mettre le site en ligne.");
+    } else {
+      console.log(`   Admin : http://localhost:${CONFIG.PORT}/admin/connexion (identifiant/mot de passe définis dans .env)`);
+    }
+  });
+}
+demarrerServeur();
 // Fonction d'envoi d'e-mail unique et réutilisable (utilisée par
 // envoyerEmailBienvenue, envoyerEmailReinitialisation et envoyerEmailTransaction).
 async function envoyerEmail(destinataire, sujet, contenu, titre = sujet, bouton = null) {
