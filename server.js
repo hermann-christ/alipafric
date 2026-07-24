@@ -76,7 +76,7 @@ const CONFIG = {
   ADMIN_IDENTIFIANT: process.env.ADMIN_IDENTIFIANT || "admin",
   ADMIN_MOT_DE_PASSE: process.env.ADMIN_MOT_DE_PASSE || "ChangezMoi123!",
 
-  CONTACT_EMAIL: "support@alipafric.com",
+  CONTACT_EMAIL: "sherlockgroup1@11719594.brevosend.com",
   CONTACT_WHATSAPP: "22892908235",
 
   PAIEMENT: {
@@ -303,6 +303,10 @@ app.use((req, res, next) => {
 
 function exigerConnexion(req, res, next) {
   if (!req.utilisateur) return res.redirect("/connexion");
+  if (req.utilisateur.compteSupprime) {
+    deconnecterUtilisateur(req, res);
+    return res.redirect("/connexion");
+  }
   next();
 }
 function exigerEmailVerifie(req, res, next) {
@@ -772,8 +776,12 @@ app.post("/inscription", (req, res) => {
   if (cgu !== "oui") {
     return res.status(400).send(pageInscription({ email, erreurCGU: "Vous devez accepter les conditions d'utilisation pour créer un compte." }));
   }
-  if (utilisateurs.some((u) => u.identifiant.toLowerCase() === email.toLowerCase())) {
+  const compteExistant = utilisateurs.find((u) => u.identifiant.toLowerCase() === email.toLowerCase());
+  if (compteExistant && !compteExistant.compteSupprime) {
     return res.status(400).send(pageInscription({ email, cguCochee: true, erreurGlobal: "Ce compte existe déjà. Essayez de vous connecter plutôt." }));
+  }
+  if (compteExistant && compteExistant.compteSupprime) {
+    return res.status(400).send(pageInscription({ email, cguCochee: true, erreurGlobal: `Un ancien compte a existé avec cet e-mail. Contactez le support (${CONFIG.CONTACT_EMAIL}) pour le réactiver ou utilisez une autre adresse e-mail.` }));
   }
 
   const { sel, hash } = hacherMotDePasse(motDePasse);
@@ -863,6 +871,9 @@ app.post("/connexion", (req, res) => {
   const u = utilisateurs.find((x) => x.identifiant.toLowerCase() === (identifiant || "").toLowerCase());
   if (!u || !motDePasseCorrect(motDePasse || "", u.motDePasseSel, u.motDePasseHash)) {
     return res.status(401).send(pageConnexion({ identifiant: "", erreurGlobal: "Identifiant ou mot de passe incorrect." }));
+  }
+  if (u.compteSupprime) {
+    return res.status(401).send(pageConnexion({ identifiant: "", erreurGlobal: `Ce compte a été supprimé. Contactez le support (${CONFIG.CONTACT_EMAIL}) si vous pensez qu'il s'agit d'une erreur.` }));
   }
   connecterUtilisateur(res, u.id);
   res.redirect(u.emailVerifie ? "/compte" : "/confirmer-email");
@@ -1175,16 +1186,21 @@ app.get("/compte/supprimer-compte", exigerConnexion, (req, res) => {
   const contenu = `
     ${entete("profil", req.utilisateur)}
     <h1>Supprimer mon compte</h1>
-    <div class="banniere banniere-erreur">Cette action est définitive et irréversible. Toutes vos données seront effacées.</div>
+    <div class="banniere banniere-erreur">Vous n'aurez plus accès à votre compte après cette action. Vos transactions passées sont conservées dans nos archives, comme l'exigent nos obligations légales et comptables (voir nos CGU/CGV).</div>
     <form method="POST" action="/compte/supprimer-compte">
-      <button type="submit" class="danger">Oui, supprimer définitivement mon compte</button>
+      <button type="submit" class="danger">Oui, supprimer mon compte</button>
     </form>
     <a class="lien-discret" href="/compte/profil">← Annuler</a>
   `;
   res.send(page("Supprimer mon compte", contenu));
 });
 app.post("/compte/supprimer-compte", exigerConnexion, (req, res) => {
-  utilisateurs = utilisateurs.filter((u) => u.id !== req.utilisateur.id);
+  // On n'efface pas le compte : on révoque simplement son accès. Ses
+  // informations, transactions et notifications restent dans la base,
+  // archivées, pour la comptabilité et les obligations légales.
+  const u = req.utilisateur;
+  u.compteSupprime = true;
+  u.dateSuppressionCompte = new Date().toISOString();
   sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
   deconnecterUtilisateur(req, res);
   res.redirect("/connexion");
@@ -1750,16 +1766,22 @@ app.get("/admin/utilisateurs", exigerAdmin, (req, res) => {
     const infos = u.nom
       ? `${u.prenom} ${u.nom}<br><small style="color:var(--texte-att);">${u.telephone}</small>`
       : `<em>${u.pseudo} (profil incomplet)</em>`;
-    const actions = u.statutVerification === "en_attente"
+    const actions = u.compteSupprime
+      ? `<form method="POST" action="/admin/utilisateurs/${u.id}/reactiver"><button class="mini-bouton ok">Réactiver</button></form>`
+      : u.statutVerification === "en_attente"
       ? `<form style="display:inline" method="POST" action="/admin/utilisateurs/${u.id}/verifier"><button class="mini-bouton ok">Vérifier</button></form>
          <form style="display:inline" method="POST" action="/admin/utilisateurs/${u.id}/refuser"><button class="mini-bouton refus">Refuser</button></form>`
       : "";
-    return `<tr><td>${image}</td><td>${u.identifiant}</td><td>${infos}</td><td><span class="badge badge-${u.statutVerification === "verifie" ? "verifie" : u.statutVerification === "refuse" ? "refuse" : "attente"}">${u.statutVerification.replace(/_/g, " ")}</span></td><td>${actions}</td></tr>`;
+    const badgeStatut = u.compteSupprime
+      ? `<span class="badge badge-refuse">Compte supprimé</span>`
+      : `<span class="badge badge-${u.statutVerification === "verifie" ? "verifie" : u.statutVerification === "refuse" ? "refuse" : "attente"}">${u.statutVerification.replace(/_/g, " ")}</span>`;
+    return `<tr${u.compteSupprime ? ' style="opacity:0.55;"' : ""}><td>${image}</td><td>${u.identifiant}</td><td>${infos}</td><td>${badgeStatut}</td><td>${actions}</td></tr>`;
   }).join("");
 
   const contenu = `
     <div class="nav-admin"><a href="/admin">← Accueil admin</a><a href="/admin/transactions">Transactions</a></div>
     <h1>Comptes clients</h1>
+    <p class="souligne">Les comptes supprimés par leurs propriétaires restent visibles ici (accès révoqué mais données archivées).</p>
     ${utilisateurs.length === 0 ? `<p class="aucune-donnee">Aucun compte.</p>` : `<table class="admin"><thead><tr><th>Pièce</th><th>E-mail</th><th>Infos</th><th>Statut</th><th>Action</th></tr></thead><tbody>${lignes}</tbody></table>`}
   `;
   res.send(page("Comptes clients", contenu, { large: true }));
@@ -1772,6 +1794,17 @@ app.post("/admin/utilisateurs/:id/verifier", exigerAdmin, (req, res) => {
 app.post("/admin/utilisateurs/:id/refuser", exigerAdmin, (req, res) => {
   const u = utilisateurs.find((x) => x.id === req.params.id);
   if (u) { u.statutVerification = "refuse"; u.raisonRefus = MESSAGE_REFUS_IDENTITE; sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs); }
+  res.redirect("/admin/utilisateurs");
+});
+// Réactivation manuelle d'un compte archivé, après contact du client avec le support.
+app.post("/admin/utilisateurs/:id/reactiver", exigerAdmin, (req, res) => {
+  const u = utilisateurs.find((x) => x.id === req.params.id);
+  if (u) {
+    u.compteSupprime = false;
+    u.dateSuppressionCompte = null;
+    u.dateReactivationCompte = new Date().toISOString();
+    sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
+  }
   res.redirect("/admin/utilisateurs");
 });
 
