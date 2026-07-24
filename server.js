@@ -22,6 +22,11 @@ const app = express();
 // 2. Servir le dossier public
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Route simple pour garder le serveur éveillé avec UptimeRobot
+app.get('/ping', (req, res) => {
+  res.status(200).send('OK');
+});
+
 // ============================================================================
 // FONCTIONS D'ENVOI D'E-MAILS
 // (la fonction envoyerEmail elle-même — celle qui appelle Brevo — est
