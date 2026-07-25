@@ -44,6 +44,16 @@ async function envoyerEmailBienvenue(email, pseudo) {
   return envoyerEmail(email, sujet, contenuHtml);
 }
 
+async function envoyerEmailConfirmationInscription(email, code) {
+  const sujet = `Confirmez votre e-mail — ${CONFIG.NOM_SITE}`;
+  const contenuHtml = `
+    <h2>Code de confirmation</h2>
+    <p>Voici votre code pour confirmer votre adresse e-mail : <b style="font-size:20px; color:#2563EB;">${code}</b></p>
+    <p>Saisissez ce code sur le site pour activer votre compte.</p>
+  `;
+  return envoyerEmail(email, sujet, contenuHtml);
+}
+
 // envoyerEmailReinitialisation est définie plus bas, juste à côté de la
 // route /mot-de-passe-oublie qui l'utilise.
 
@@ -805,6 +815,8 @@ app.post("/inscription", (req, res) => {
   utilisateurs.push(utilisateur);
   sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
   connecterUtilisateur(res, utilisateur.id);
+  envoyerEmailConfirmationInscription(utilisateur.identifiant, utilisateur.codeEmail)
+    .catch((err) => console.error("Erreur e-mail confirmation inscription :", err.message));
   res.redirect("/confirmer-email");
 });
 
@@ -813,8 +825,7 @@ app.get("/confirmer-email", exigerConnexion, (req, res) => {
   if (u.emailVerifie) return res.redirect("/compte");
   const contenu = `
     <h1>Confirmez votre e-mail</h1>
-    <p class="souligne">Un code a été "envoyé" à ${u.identifiant}.</p>
-    <div class="banniere banniere-attente">Code de démonstration (pas de service e-mail réel connecté) : <b style="font-size:18px;">${u.codeEmail}</b></div>
+    <p class="souligne">Un code vient de vous être envoyé par e-mail à ${u.identifiant}.</p>
     <div class="carte">
       <form method="POST" action="/confirmer-email">
         <label for="code">Code à 6 chiffres</label>
@@ -842,6 +853,8 @@ app.post("/confirmer-email", exigerConnexion, (req, res) => {
 app.get("/confirmer-email/renvoyer", exigerConnexion, (req, res) => {
   req.utilisateur.codeEmail = genererCode();
   sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
+  envoyerEmailConfirmationInscription(req.utilisateur.identifiant, req.utilisateur.codeEmail)
+    .catch((err) => console.error("Erreur e-mail renvoi confirmation :", err.message));
   res.redirect("/confirmer-email");
 });
 
