@@ -1370,6 +1370,10 @@ app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exiger
         <input type="hidden" name="alipayImage" value="${alipayImage}">
         <input type="hidden" name="moyenPaiement" value="${moyenPaiement}">
         <input type="hidden" name="numeroExpediteur" value="${numeroExpediteur}">
+        <label style="display:flex; align-items:flex-start; gap:8px; text-transform:none; font-weight:400; color:var(--texte-att); margin-top:14px; font-size:13px;">
+          <input type="checkbox" name="cguTransaction" value="oui" style="width:auto; margin-top:2px;" required>
+          <span>Je confirme avoir lu et j'accepte les <a href="/conditions-utilisation" target="_blank" class="souligne">Conditions Générales d'Utilisation et de Vente (CGU/CGV)</a>, notamment concernant la correspondance de nom du compte utilisé pour le dépôt.</span>
+        </label>
         <button type="submit" class="jaune">J'ai payé</button>
       </form>
     </div>
@@ -1380,10 +1384,13 @@ app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exiger
 // C'est cette étape qui crée réellement la transaction. Si le client
 // abandonne avant, rien n'est enregistré : il repart de zéro.
 app.post("/compte/finaliser-commande", exigerConnexion, exigerEmailVerifie, exigerVerifie, (req, res) => {
-  const { montantRMB, alipayImage, moyenPaiement, numeroExpediteur } = req.body;
+  const { montantRMB, alipayImage, moyenPaiement, numeroExpediteur, cguTransaction } = req.body;
   const montant = parseFloat(montantRMB);
   if (!montant || !alipayImage || !CONFIG.PAIEMENT[moyenPaiement] || !numeroExpediteur) {
     return res.status(400).send(page("Erreur", `<h1>Requête invalide</h1><a href="/compte/nouvelle-demande">← Recommencer</a>`));
+  }
+  if (cguTransaction !== "oui") {
+    return res.status(400).send(page("Erreur", `<h1>Acceptation des CGU/CGV requise</h1><p class="souligne">Vous devez cocher la case d'acceptation des Conditions Générales d'Utilisation et de Vente pour valider votre paiement.</p><a href="/compte/nouvelle-demande">← Recommencer</a>`));
   }
 
   const montantCFA = Math.round(montant * CONFIG.TAUX_CHANGE);
@@ -1446,7 +1453,13 @@ app.get("/compte/transactions/:reference", exigerConnexion, exigerEmailVerifie, 
         </div>
         ${info.noteFrais ? `<div class="avertissement">⚠️ Important : ne pas ajouter les frais de retrait lors de votre dépôt.</div>` : ""}
 
-        <a class="bouton jaune" href="/compte/transactions/${t.reference}/preuve">J'ai payé</a>
+        <form method="GET" action="/compte/transactions/${t.reference}/preuve">
+          <label style="display:flex; align-items:flex-start; gap:8px; text-transform:none; font-weight:400; color:var(--texte-att); margin-top:14px; font-size:13px;">
+            <input type="checkbox" name="cguTransaction" value="oui" style="width:auto; margin-top:2px;" required>
+            <span>Je confirme avoir lu et j'accepte les <a href="/conditions-utilisation" target="_blank" class="souligne">Conditions Générales d'Utilisation et de Vente (CGU/CGV)</a>, notamment concernant la correspondance de nom du compte utilisé pour le dépôt.</span>
+          </label>
+          <button type="submit" class="jaune">J'ai payé</button>
+        </form>
       </div>
     `;
   } else if (t.statut === "preuve_recue" || t.statut === "paye") {
