@@ -86,7 +86,7 @@ const CONFIG = {
   ADMIN_IDENTIFIANT: process.env.ADMIN_IDENTIFIANT || "admin",
   ADMIN_MOT_DE_PASSE: process.env.ADMIN_MOT_DE_PASSE || "ChangezMoi123!",
 
-  CONTACT_EMAIL: "sherlockgroup1@11719594.brevosend.com",
+  CONTACT_EMAIL: "sherlockgroup1@gmail.com",
   CONTACT_WHATSAPP: "22892908235",
 
   PAIEMENT: {
@@ -767,7 +767,7 @@ app.get("/conditions-utilisation", (req, res) => {
 
       <h3>ARTICLE 9 : DROIT APPLICABLE ET RÈGLEMENT DES LITIGES</h3>
       <p>Les présentes conditions sont soumises au droit commercial applicable au Togo et aux dispositions du droit des affaires de l'OHADA.</p>
-      <p>En cas de contestation ou de litige, le Client s'engage à contacter en priorité le service client du Prestataire afin de rechercher une solution à l'amiable. À défaut de résolution amiable dans un délai de trente (30) jours, le litige sera porté devant les tribunaux compétents de Lomé (Togo).</p>
+      <p>En cas de contestation ou de litige, le Client s'engage à contacter en priorité le service client du Prestataire afin de rechercher une solution à l'amiable. À défaut de résolution amiable dans un délai de soixante (60) jours, le litige sera porté devant les tribunaux compétents de Lomé (Togo).</p>
     </div>
     <a class="lien-discret" href="/inscription#formulaire">← Retour à l'inscription</a>
   `;
@@ -791,7 +791,7 @@ app.post("/inscription", (req, res) => {
     return res.status(400).send(pageInscription({ email, cguCochee: true, erreurGlobal: "Ce compte existe déjà. Essayez de vous connecter plutôt." }));
   }
   if (compteExistant && compteExistant.compteSupprime) {
-    return res.status(400).send(pageInscription({ email, cguCochee: true, erreurGlobal: `Un ancien compte a existé avec cet e-mail. Contactez le support (${CONFIG.CONTACT_EMAIL}) pour le réactiver ou utilisez une autre adresse e-mail.` }));
+    return res.status(400).send(pageInscription({ email, cguCochee: true, erreurGlobal: `Un ancien compte a existé avec cette adresse e-mail. Contactez le support pour le réactiver, ou utilisez une autre adresse e-mail.<a class="bouton jaune petit" style="margin-top:10px;" href="mailto:${CONFIG.CONTACT_EMAIL}?subject=${encodeURIComponent("Réactivation de mon compte " + CONFIG.NOM_SITE)}&body=${encodeURIComponent("Bonjour,\n\nJe souhaite réactiver mon compte " + CONFIG.NOM_SITE + " associé à l'adresse : " + email + "\n\nMerci.")}">Contacter le support par e-mail</a>` }));
   }
 
   const { sel, hash } = hacherMotDePasse(motDePasse);
@@ -886,7 +886,7 @@ app.post("/connexion", (req, res) => {
     return res.status(401).send(pageConnexion({ identifiant: "", erreurGlobal: "Identifiant ou mot de passe incorrect." }));
   }
   if (u.compteSupprime) {
-    return res.status(401).send(pageConnexion({ identifiant: "", erreurGlobal: `Ce compte a été supprimé. Contactez le support (${CONFIG.CONTACT_EMAIL}) si vous pensez qu'il s'agit d'une erreur.` }));
+    return res.status(401).send(pageConnexion({ identifiant: "", erreurGlobal: `Ce compte a été supprimé. Si vous pensez qu'il s'agit d'une erreur, contactez le support.<a class="bouton jaune petit" style="margin-top:10px;" href="mailto:${CONFIG.CONTACT_EMAIL}?subject=${encodeURIComponent("Compte supprimé par erreur — " + CONFIG.NOM_SITE)}&body=${encodeURIComponent("Bonjour,\n\nMon compte associé à l'adresse " + (identifiant || "") + " a été supprimé alors que je pense qu'il s'agit d'une erreur. Merci de vérifier.\n\nMerci.")}">Contacter le support par e-mail</a>` }));
   }
   connecterUtilisateur(res, u.id);
   res.redirect(u.emailVerifie ? "/compte" : "/confirmer-email");
@@ -1830,6 +1830,11 @@ app.post("/admin/utilisateurs/:id/reactiver", exigerAdmin, (req, res) => {
     u.dateSuppressionCompte = null;
     u.dateReactivationCompte = new Date().toISOString();
     sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
+    envoyerEmail(
+      u.identifiant,
+      `${CONFIG.NOM_SITE} — votre compte a été réactivé ✔`,
+      `<p>Bonjour ${u.prenom || u.pseudo},</p><p>Bonne nouvelle : votre compte ${CONFIG.NOM_SITE} a été réactivé par notre équipe.</p><p>Vous pouvez dès à présent vous reconnecter avec votre e-mail et votre mot de passe habituels, et retrouver l'ensemble de votre historique.</p>`
+    ).catch((err) => console.error("Erreur e-mail réactivation :", err.message));
   }
   res.redirect("/admin/utilisateurs");
 });
