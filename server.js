@@ -15,6 +15,7 @@ const crypto = require("crypto");
 const multer = require("multer");
 const PDFDocument = require("pdfkit");
 const { MongoClient } = require("mongodb");
+const cloudinary = require("cloudinary").v2;
 
 // 1. Déclarer l'application Express UNE SEULE FOIS
 const app = express();
@@ -148,6 +149,27 @@ const NOM_COLLECTION = {
 // ----------------------------------------------------------------------------
 const MONGO_URI = process.env.MONGO_URI;
 let db = null;
+
+// ----------------------------------------------------------------------------
+// Stockage des fichiers uploadés (pièces d'identité, QR Alipay, preuves de
+// paiement, PDF générés) : Cloudinary si configuré (persistant), sinon
+// disque local (comme avant, non persistant sur Render).
+// ----------------------------------------------------------------------------
+const CLOUDINARY_ACTIF = !!(
+  process.env.CLOUDINARY_CLOUD_NAME &&
+  process.env.CLOUDINARY_API_KEY &&
+  process.env.CLOUDINARY_API_SECRET
+);
+if (CLOUDINARY_ACTIF) {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+  });
+  console.log("✅ Cloudinary configuré — les fichiers uploadés sont persistants.");
+} else {
+  console.warn("⚠️  CLOUDINARY non configuré : les fichiers uploadés resteront sur le disque local (NON persistants sur Render). Voir .env.");
+}
 
 async function connecterMongo() {
   if (!MONGO_URI) {
@@ -330,13 +352,18 @@ function exigerAdmin(req, res, next) {
 }
 
 function creerUpload(dossierDestination, typesAutorises, tailleMaxOctets) {
-  const stockage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, dossierDestination),
-    filename: (req, file, cb) => {
-      const extension = path.extname(file.originalname) || ".jpg";
-      cb(null, `${Date.now()}-${Math.floor(Math.random() * 1000)}${extension}`);
-    },
-  });
+  // Si Cloudinary est configuré, on garde les fichiers en mémoire (buffer) le
+  // temps de les envoyer vers Cloudinary. Sinon, comportement historique :
+  // écriture directe sur le disque local (NON persistant sur Render).
+  const stockage = CLOUDINARY_ACTIF
+    ? multer.memoryStorage()
+    : multer.diskStorage({
+        destination: (req, file, cb) => cb(null, dossierDestination),
+        filename: (req, file, cb) => {
+          const extension = path.extname(file.originalname) || ".jpg";
+          cb(null, `${Date.now()}-${Math.floor(Math.random() * 1000)}${extension}`);
+        },
+      });
   return multer({
     storage: stockage,
     limits: { fileSize: tailleMaxOctets },
@@ -357,6 +384,77 @@ const uploadPreuve = creerUpload(
   ["image/jpeg", "image/png", "image/jpg", "application/pdf"],
   8 * 1024 * 1024
 );
+
+// ----------------------------------------------------------------------------
+// Fichiers uploadés : Cloudinary si configuré (persistant, survit aux
+// redéploiements), sinon disque local (comme avant, non persistant sur Render).
+// ----------------------------------------------------------------------------
+
+// Envoie le fichier reçu par multer (req.file) vers Cloudinary, ou renvoie
+// simplement son nom local si Cloudinary n'est pas configuré. Retourne
+// { reference, estPdf } — "reference" est soit une URL complète (Cloudinary)
+// soit un nom de fichier local, selon le mode.
+async function traiterFichierUploade(file, sousDossier) {
+  const estPdf = file.mimetype === "application/pdf";
+  if (!CLOUDINARY_ACTIF) {
+    return { reference: file.filename, estPdf };
+  }
+  const resultat = await new Promise((resolve, reject) => {
+    const flux = cloudinary.uploader.upload_stream(
+      { folder: `alipafric/${sousDossier}`, resource_type: estPdf ? "raw" : "image" },
+      (erreur, res) => (erreur ? reject(erreur) : resolve(res))
+    );
+    flux.end(file.buffer);
+  });
+  return { reference: resultat.secure_url, estPdf };
+}
+
+// Construit le lien à afficher (href) pour un fichier, quel que soit le mode.
+function hrefFichier(reference, dossierWeb) {
+  if (!reference) return null;
+  if (reference.startsWith("http")) return reference; // Cloudinary : URL déjà complète
+  return `/uploads/${dossierWeb}/${reference}`; // Mode local
+}
+
+// Récupère les octets d'un fichier (pour la génération de PDF), quel que
+// soit le mode de stockage.
+async function bufferFichier(reference, dossierLocal) {
+  if (!reference) return null;
+  if (reference.startsWith("http")) {
+    const reponse = await axios.get(reference, { responseType: "arraybuffer" });
+    return Buffer.from(reponse.data);
+  }
+  return fs.readFileSync(path.join(dossierLocal, reference));
+}
+
+// Génère un PDF avec PDFKit en mémoire (buffer), et l'envoie vers Cloudinary
+// si configuré, sinon l'écrit sur le disque local. Retourne { reference }
+// (URL Cloudinary ou nom de fichier local, à utiliser avec hrefFichier()).
+async function genererEtStockerPDF(nomFichier, construirePDF, sousDossier, dossierLocal) {
+  const doc = new PDFDocument({ margin: 40, size: "A4" });
+  const morceaux = [];
+  const bufferPromesse = new Promise((resolve, reject) => {
+    doc.on("data", (m) => morceaux.push(m));
+    doc.on("end", () => resolve(Buffer.concat(morceaux)));
+    doc.on("error", reject);
+  });
+  await construirePDF(doc);
+  doc.end();
+  const buffer = await bufferPromesse;
+
+  if (!CLOUDINARY_ACTIF) {
+    fs.writeFileSync(path.join(dossierLocal, nomFichier), buffer);
+    return { reference: nomFichier };
+  }
+  const resultat = await new Promise((resolve, reject) => {
+    const flux = cloudinary.uploader.upload_stream(
+      { folder: `alipafric/${sousDossier}`, resource_type: "raw", public_id: nomFichier.replace(/\.pdf$/, "") },
+      (erreur, res) => (erreur ? reject(erreur) : resolve(res))
+    );
+    flux.end(buffer);
+  });
+  return { reference: resultat.secure_url };
+}
 
 // ----------------------------------------------------------------------------
 // 5) MISE EN PAGE COMMUNE — thème sombre, accents bleu / jaune
@@ -1156,17 +1254,19 @@ app.get("/compte/profil", exigerConnexion, exigerEmailVerifie, (req, res) => {
   res.send(page("Mon profil", contenu));
 });
 
-app.post("/compte/profil", exigerConnexion, exigerEmailVerifie, uploadIdentite.single("pieceIdentite"), (req, res) => {
+app.post("/compte/profil", exigerConnexion, exigerEmailVerifie, uploadIdentite.single("pieceIdentite"), async (req, res) => {
   const u = req.utilisateur;
   const { nom, prenom, indicatif, numeroTelephone } = req.body;
   const piece = req.file;
   if (!nom || !prenom || !indicatif || !numeroTelephone || !piece) {
     return res.status(400).send(page("Erreur", `<h1>Merci de remplir tous les champs</h1><a href="/compte/profil">← Retour</a>`));
   }
+  const { reference, estPdf } = await traiterFichierUploade(piece, "identite");
   u.nom = nom;
   u.prenom = prenom;
   u.telephone = `${indicatif} ${numeroTelephone}`;
-  u.pieceIdentite = piece.filename;
+  u.pieceIdentite = reference;
+  u.pieceIdentiteEstPdf = estPdf;
   u.raisonRefus = null;
   // Le numéro de téléphone n'est pas vérifié par SMS : il est simplement
   // renseigné. C'est la pièce d'identité qui est vérifiée par l'admin.
@@ -1266,12 +1366,13 @@ app.get("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerV
   res.send(page("Nouvelle recharge", contenu));
 });
 
-app.post("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerVerifie, uploadAlipay.single("alipayImage"), (req, res) => {
+app.post("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerVerifie, uploadAlipay.single("alipayImage"), async (req, res) => {
   const montant = parseFloat(req.body.montantRMB);
   const image = req.file;
   if (!image || !montant || montant < CONFIG.MONTANT_MIN_RMB) {
     return res.status(400).send(page("Erreur", `<h1>Montant invalide</h1><p class="souligne">Le minimum est de ${CONFIG.MONTANT_MIN_RMB} RMB et une image est requise.</p><a href="/compte/nouvelle-demande">← Retour</a>`));
   }
+  const { reference: referenceImage } = await traiterFichierUploade(image, "alipay");
 
   const estTogo = (req.utilisateur.telephone || "").trim().startsWith("+228");
   const optionsPaiement = Object.entries(CONFIG.PAIEMENT)
@@ -1292,7 +1393,7 @@ app.post("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exiger
     <div class="carte">
       <form method="POST" action="/compte/choisir-paiement">
         <input type="hidden" name="montantRMB" value="${montant}">
-        <input type="hidden" name="alipayImage" value="${image.filename}">
+        <input type="hidden" name="alipayImage" value="${referenceImage}">
         ${optionsPaiement}
 
         <label for="numeroExpediteur" id="labelNumeroExpediteur">Numéro ou compte utilisé pour le dépôt</label>
@@ -1500,7 +1601,7 @@ app.get("/compte/transactions/:reference", exigerConnexion, exigerEmailVerifie, 
         <div class="ligne"><span>Montant envoyé</span><b>${t.total.toLocaleString("fr-FR")} XOF</b></div>
         <div class="ligne"><span>Montant reçu</span><b>¥ ${t.montantRMB}</b></div>
         <div class="ligne"><span>Référence</span><b>${t.reference}</b></div>
-        ${t.recuPDF ? `<a class="bouton jaune" href="/recus/${t.recuPDF}" target="_blank">Télécharger le reçu</a>` : ""}
+        ${t.recuPDF ? `<a class="bouton jaune" href="${hrefFichier(t.recuPDF, "recus")}" target="_blank">Télécharger le reçu</a>` : ""}
       </div>
     `;
   } else {
@@ -1544,7 +1645,9 @@ app.post("/compte/transactions/:reference/preuve-paiement", exigerConnexion, exi
   if (!t || t.statut !== "en_attente_paiement") return res.status(404).send(page("Introuvable", `<h1>Transaction introuvable</h1><a href="/compte">← Retour</a>`));
   if (!req.file) return res.status(400).send(page("Erreur", `<h1>Merci de joindre une preuve de paiement</h1><a href="/compte/transactions/${t.reference}/preuve">← Retour</a>`));
 
-  t.imagePaiement = req.file.filename;
+  const { reference: referencePreuve, estPdf } = await traiterFichierUploade(req.file, "preuves");
+  t.imagePaiement = referencePreuve;
+  t.imagePaiementEstPdf = estPdf;
   t.statut = "preuve_recue";
   t.datePreuve = new Date().toISOString();
   // La fiche interne n'est créée qu'après confirmation par l'admin (pas ici).
@@ -1659,82 +1762,83 @@ app.get("/compte/support", exigerConnexion, exigerEmailVerifie, (req, res) => {
 // ============================================================================
 // 14) GÉNÉRATION DES PDF
 // ============================================================================
-function genererFichePDF(t) {
-  return new Promise((resolve, reject) => {
-    const chemin = path.join(DOSSIER_FICHES, `${t.reference}.pdf`);
-    const doc = new PDFDocument({ margin: 40, size: "A4" });
-    const flux = fs.createWriteStream(chemin);
-    doc.pipe(flux);
-    doc.fontSize(18).fillColor("#2563EB").text(`Fiche interne — ${CONFIG.NOM_SITE}`);
-    doc.moveDown(0.8);
-    doc.fontSize(11).fillColor("#111");
-    doc.text(`Référence : ${t.reference}`);
-    doc.text(`Client : ${t.identifiantUtilisateur} — ${t.prenomNomComplet || t.nomUtilisateur}`);
-    doc.text(`Montant RMB : ${t.montantRMB}`);
-    doc.text(`Total XOF : ${formaterFCFA(t.total)} F CFA`);
-    doc.text(`Moyen de paiement : ${CONFIG.PAIEMENT[t.moyenPaiement]?.nom || t.moyenPaiement}`);
-    doc.text(`Statut : ${t.statut}`);
-    doc.moveDown();
-    if (t.alipayImage) {
-      doc.fontSize(13).fillColor("#2563EB").text("QR Alipay du client");
-      doc.moveDown(0.3);
-      try { doc.image(path.join(DOSSIER_UPLOADS_ALIPAY, t.alipayImage), { fit: [480, 550], align: "center" }); } catch (e) {}
-    }
-    if (t.imagePaiement) {
-      doc.addPage();
-      doc.fontSize(13).fillColor("#2563EB").text("Preuve de paiement");
-      doc.moveDown(0.3);
-      try { doc.image(path.join(DOSSIER_UPLOADS_PREUVES, t.imagePaiement), { fit: [480, 650], align: "center" }); } catch (e) {}
-    }
-    doc.end();
-    flux.on("finish", () => resolve(chemin));
-    flux.on("error", reject);
-  });
+async function genererFichePDF(t) {
+  const bufferAlipay = t.alipayImage ? await bufferFichier(t.alipayImage, DOSSIER_UPLOADS_ALIPAY).catch(() => null) : null;
+  const bufferPreuve = t.imagePaiement ? await bufferFichier(t.imagePaiement, DOSSIER_UPLOADS_PREUVES).catch(() => null) : null;
+
+  return genererEtStockerPDF(
+    `${t.reference}.pdf`,
+    async (doc) => {
+      doc.fontSize(18).fillColor("#2563EB").text(`Fiche interne — ${CONFIG.NOM_SITE}`);
+      doc.moveDown(0.8);
+      doc.fontSize(11).fillColor("#111");
+      doc.text(`Référence : ${t.reference}`);
+      doc.text(`Client : ${t.identifiantUtilisateur} — ${t.prenomNomComplet || t.nomUtilisateur}`);
+      doc.text(`Montant RMB : ${t.montantRMB}`);
+      doc.text(`Total XOF : ${formaterFCFA(t.total)} F CFA`);
+      doc.text(`Moyen de paiement : ${CONFIG.PAIEMENT[t.moyenPaiement]?.nom || t.moyenPaiement}`);
+      doc.text(`Statut : ${t.statut}`);
+      doc.moveDown();
+      if (bufferAlipay) {
+        doc.fontSize(13).fillColor("#2563EB").text("QR Alipay du client");
+        doc.moveDown(0.3);
+        try { doc.image(bufferAlipay, { fit: [480, 550], align: "center" }); } catch (e) {}
+      }
+      if (bufferPreuve) {
+        doc.addPage();
+        doc.fontSize(13).fillColor("#2563EB").text("Preuve de paiement");
+        doc.moveDown(0.3);
+        try { doc.image(bufferPreuve, { fit: [480, 650], align: "center" }); } catch (e) {}
+      }
+    },
+    "fiches",
+    DOSSIER_FICHES
+  );
 }
-function genererRecuClient(t) {
-  return new Promise((resolve, reject) => {
-    const chemin = path.join(DOSSIER_RECUS, `${t.reference}.pdf`);
-    const doc = new PDFDocument({ margin: 50, size: "A4" });
-    const flux = fs.createWriteStream(chemin);
-    doc.pipe(flux);
-    doc.fontSize(20).fillColor("#2563EB").text(CONFIG.NOM_SITE, { align: "center" });
-    doc.fontSize(12).fillColor("#555").text("Reçu de transaction", { align: "center" });
-    doc.moveDown(1.5);
-    doc.fontSize(11).fillColor("#111");
-    doc.text(`Référence : ${t.reference}`);
-    doc.text(`Client : ${t.prenomNomComplet || t.nomUtilisateur}`);
-    doc.text(`Date : ${new Date(t.dateCredit || Date.now()).toLocaleString("fr-FR")}`);
-    doc.text(`Montant reçu sur Alipay : ${t.montantRMB} RMB`);
-    doc.text(`Montant payé : ${formaterFCFA(t.total)} F CFA`);
-    doc.text(`Moyen de paiement : ${CONFIG.PAIEMENT[t.moyenPaiement]?.nom || t.moyenPaiement}`);
-    doc.moveDown(1);
-    doc.fontSize(13).fillColor("#22C55E").text("✔ Transaction effectuée avec succès", { align: "center" });
+async function genererRecuClient(t) {
+  const bufferAlipay = t.alipayImage ? await bufferFichier(t.alipayImage, DOSSIER_UPLOADS_ALIPAY).catch(() => null) : null;
+  const bufferPreuve = t.imagePaiement ? await bufferFichier(t.imagePaiement, DOSSIER_UPLOADS_PREUVES).catch(() => null) : null;
 
-    // Les deux images côte à côte, sur la même page (pas de doc.addPage()).
-    doc.moveDown(1);
-    const yImages = doc.y;
-    const largeurColonne = 220;
-    const xGauche = 50;
-    const xDroite = 595.28 - 50 - largeurColonne;
-    const hauteurMax = 400;
+  return genererEtStockerPDF(
+    `${t.reference}.pdf`,
+    async (doc) => {
+      doc.fontSize(20).fillColor("#2563EB").text(CONFIG.NOM_SITE, { align: "center" });
+      doc.fontSize(12).fillColor("#555").text("Reçu de transaction", { align: "center" });
+      doc.moveDown(1.5);
+      doc.fontSize(11).fillColor("#111");
+      doc.text(`Référence : ${t.reference}`);
+      doc.text(`Client : ${t.prenomNomComplet || t.nomUtilisateur}`);
+      doc.text(`Date : ${new Date(t.dateCredit || Date.now()).toLocaleString("fr-FR")}`);
+      doc.text(`Montant reçu sur Alipay : ${t.montantRMB} RMB`);
+      doc.text(`Montant payé : ${formaterFCFA(t.total)} F CFA`);
+      doc.text(`Moyen de paiement : ${CONFIG.PAIEMENT[t.moyenPaiement]?.nom || t.moyenPaiement}`);
+      doc.moveDown(1);
+      doc.fontSize(13).fillColor("#22C55E").text("✔ Transaction effectuée avec succès", { align: "center" });
 
-    if (t.alipayImage) {
-      doc.fontSize(10).fillColor("#2563EB").text("Code QR Alipay", xGauche, yImages, { width: largeurColonne, align: "center" });
-      try {
-        doc.image(path.join(DOSSIER_UPLOADS_ALIPAY, t.alipayImage), xGauche, yImages + 16, { fit: [largeurColonne, hauteurMax], align: "center" });
-      } catch (e) {}
-    }
-    if (t.imagePaiement) {
-      doc.fontSize(10).fillColor("#2563EB").text("Preuve de paiement", xDroite, yImages, { width: largeurColonne, align: "center" });
-      try {
-        doc.image(path.join(DOSSIER_UPLOADS_PREUVES, t.imagePaiement), xDroite, yImages + 16, { fit: [largeurColonne, hauteurMax], align: "center" });
-      } catch (e) {}
-    }
+      // Les deux images côte à côte, sur la même page (pas de doc.addPage()).
+      doc.moveDown(1);
+      const yImages = doc.y;
+      const largeurColonne = 220;
+      const xGauche = 50;
+      const xDroite = 595.28 - 50 - largeurColonne;
+      const hauteurMax = 400;
 
-    doc.end();
-    flux.on("finish", () => resolve(chemin));
-    flux.on("error", reject);
-  });
+      if (bufferAlipay) {
+        doc.fontSize(10).fillColor("#2563EB").text("Code QR Alipay", xGauche, yImages, { width: largeurColonne, align: "center" });
+        try {
+          doc.image(bufferAlipay, xGauche, yImages + 16, { fit: [largeurColonne, hauteurMax], align: "center" });
+        } catch (e) {}
+      }
+      if (bufferPreuve) {
+        doc.fontSize(10).fillColor("#2563EB").text("Preuve de paiement", xDroite, yImages, { width: largeurColonne, align: "center" });
+        try {
+          doc.image(bufferPreuve, xDroite, yImages + 16, { fit: [largeurColonne, hauteurMax], align: "center" });
+        } catch (e) {}
+      }
+    },
+    "recus",
+    DOSSIER_RECUS
+  );
 }
 
 // ============================================================================
@@ -1785,10 +1889,11 @@ app.get("/admin", exigerAdmin, (req, res) => {
 
 app.get("/admin/utilisateurs", exigerAdmin, (req, res) => {
   const lignes = [...utilisateurs].reverse().map((u) => {
-    const estPdf = u.pieceIdentite && u.pieceIdentite.toLowerCase().endsWith(".pdf");
+    const estPdf = u.pieceIdentiteEstPdf ?? (u.pieceIdentite && u.pieceIdentite.toLowerCase().endsWith(".pdf"));
+    const lienPiece = hrefFichier(u.pieceIdentite, "identite");
     const image = !u.pieceIdentite ? "—" : estPdf
-      ? `<a href="/uploads/identite/${u.pieceIdentite}" target="_blank">📄 PDF</a>`
-      : `<a href="/uploads/identite/${u.pieceIdentite}" target="_blank"><img class="miniature" src="/uploads/identite/${u.pieceIdentite}"></a>`;
+      ? `<a href="${lienPiece}" target="_blank">📄 PDF</a>`
+      : `<a href="${lienPiece}" target="_blank"><img class="miniature" src="${lienPiece}"></a>`;
     const infos = u.nom
       ? `${u.prenom} ${u.nom}<br><small style="color:var(--texte-att);">${u.telephone}</small>`
       : `<em>${u.pseudo} (profil incomplet)</em>`;
@@ -1883,11 +1988,13 @@ app.get("/admin/transactions", exigerAdmin, (req, res) => {
   }
 
   const lignes = listeFiltree.reverse().map((t) => {
-    const imgAlipay = t.alipayImage ? `<a href="/uploads/alipay/${t.alipayImage}" target="_blank"><img class="miniature" src="/uploads/alipay/${t.alipayImage}"></a>` : "—";
-    const estPdf = t.imagePaiement && t.imagePaiement.toLowerCase().endsWith(".pdf");
-    const imgPreuve = !t.imagePaiement ? "—" : estPdf ? `<a href="/uploads/preuves/${t.imagePaiement}" target="_blank">📄 PDF</a>` : `<a href="/uploads/preuves/${t.imagePaiement}" target="_blank"><img class="miniature" src="/uploads/preuves/${t.imagePaiement}"></a>`;
+    const lienAlipay = hrefFichier(t.alipayImage, "alipay");
+    const imgAlipay = t.alipayImage ? `<a href="${lienAlipay}" target="_blank"><img class="miniature" src="${lienAlipay}"></a>` : "—";
+    const estPdf = t.imagePaiementEstPdf ?? (t.imagePaiement && t.imagePaiement.toLowerCase().endsWith(".pdf"));
+    const lienPreuve = hrefFichier(t.imagePaiement, "preuves");
+    const imgPreuve = !t.imagePaiement ? "—" : estPdf ? `<a href="${lienPreuve}" target="_blank">📄 PDF</a>` : `<a href="${lienPreuve}" target="_blank"><img class="miniature" src="${lienPreuve}"></a>`;
     const heurePreuve = t.datePreuve ? new Date(t.datePreuve).toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
-    const fiche = t.fichePDF ? `<a href="/fiches/${t.fichePDF}" target="_blank">📄</a>` : "—";
+    const fiche = t.fichePDF ? `<a href="${hrefFichier(t.fichePDF, "fiches")}" target="_blank">📄</a>` : "—";
     let actions = "";
     if (t.statut === "preuve_recue") {
       actions = `<form style="display:inline" method="POST" action="/admin/transactions/${t.reference}/confirmer-paiement"><button class="mini-bouton info">Confirmer</button></form>
@@ -1929,8 +2036,8 @@ app.post("/admin/transactions/:reference/confirmer-paiement", exigerAdmin, async
     t.statut = "paye";
     t.datePaiementConfirme = new Date().toISOString();
     try {
-      await genererFichePDF(t);
-      t.fichePDF = `${t.reference}.pdf`;
+      const { reference } = await genererFichePDF(t);
+      t.fichePDF = reference;
     } catch (e) {}
     sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
     ajouterNotification(t.utilisateurId, `Votre paiement de ${t.total.toLocaleString("fr-FR")} F CFA a été confirmé. Créditation Alipay en cours.`, t.reference);
@@ -1954,9 +2061,10 @@ app.post("/admin/transactions/:reference/confirmer-recharge", exigerAdmin, async
     t.statut = "effectue";
     t.dateCredit = new Date().toISOString();
     try {
-      await genererFichePDF(t);
-      await genererRecuClient(t);
-      t.recuPDF = `${t.reference}.pdf`;
+      const { reference: refFiche } = await genererFichePDF(t);
+      t.fichePDF = refFiche;
+      const { reference: refRecu } = await genererRecuClient(t);
+      t.recuPDF = refRecu;
     } catch (e) { console.error(e.message); }
     sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
     ajouterNotification(t.utilisateurId, `Votre compte Alipay a été crédité de ${t.montantRMB} RMB ✔ Transaction terminée.`, t.reference);
