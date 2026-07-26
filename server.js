@@ -1793,7 +1793,8 @@ app.get("/admin/utilisateurs", exigerAdmin, (req, res) => {
       ? `${u.prenom} ${u.nom}<br><small style="color:var(--texte-att);">${u.telephone}</small>`
       : `<em>${u.pseudo} (profil incomplet)</em>`;
     const actions = u.compteSupprime
-      ? `<form method="POST" action="/admin/utilisateurs/${u.id}/reactiver"><button class="mini-bouton ok">Réactiver</button></form>`
+      ? `<form style="display:inline" method="POST" action="/admin/utilisateurs/${u.id}/reactiver"><button class="mini-bouton ok">Réactiver</button></form>
+         <a class="mini-bouton refus" style="text-decoration:none; display:inline-block;" href="/admin/utilisateurs/${u.id}/supprimer-definitivement">Supprimer définitivement</a>`
       : u.statutVerification === "en_attente"
       ? `<form style="display:inline" method="POST" action="/admin/utilisateurs/${u.id}/verifier"><button class="mini-bouton ok">Vérifier</button></form>
          <form style="display:inline" method="POST" action="/admin/utilisateurs/${u.id}/refuser"><button class="mini-bouton refus">Refuser</button></form>`
@@ -1836,6 +1837,36 @@ app.post("/admin/utilisateurs/:id/reactiver", exigerAdmin, (req, res) => {
       `<p>Bonjour ${u.prenom || u.pseudo},</p><p>Bonne nouvelle : votre compte ${CONFIG.NOM_SITE} a été réactivé par notre équipe.</p><p>Vous pouvez dès à présent vous reconnecter avec votre e-mail et votre mot de passe habituels, et retrouver l'ensemble de votre historique.</p>`
     ).catch((err) => console.error("Erreur e-mail réactivation :", err.message));
   }
+  res.redirect("/admin/utilisateurs");
+});
+
+// Suppression DÉFINITIVE (compte + transactions + notifications), réservée
+// aux comptes déjà archivés par précaution. Action irréversible.
+app.get("/admin/utilisateurs/:id/supprimer-definitivement", exigerAdmin, (req, res) => {
+  const u = utilisateurs.find((x) => x.id === req.params.id);
+  if (!u) return res.redirect("/admin/utilisateurs");
+  const nbTransactions = transactions.filter((t) => t.utilisateurId === u.id).length;
+  const nbNotifications = notifications.filter((n) => n.utilisateurId === u.id).length;
+  const contenu = `
+    <h1>Supprimer définitivement ce compte</h1>
+    <div class="banniere banniere-erreur">
+      Cette action est <b>définitive et irréversible</b>. Le compte ${u.identifiant}, ainsi que ${nbTransactions} transaction(s) et ${nbNotifications} notification(s) associées, seront effacés de la base de données pour toujours.
+    </div>
+    <form method="POST" action="/admin/utilisateurs/${u.id}/supprimer-definitivement">
+      <button type="submit" class="danger">Oui, tout supprimer définitivement</button>
+    </form>
+    <a class="lien-discret" href="/admin/utilisateurs">← Annuler</a>
+  `;
+  res.send(page("Suppression définitive", contenu, { large: true }));
+});
+app.post("/admin/utilisateurs/:id/supprimer-definitivement", exigerAdmin, (req, res) => {
+  const idCible = req.params.id;
+  utilisateurs = utilisateurs.filter((u) => u.id !== idCible);
+  transactions = transactions.filter((t) => t.utilisateurId !== idCible);
+  notifications = notifications.filter((n) => n.utilisateurId !== idCible);
+  sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
+  sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
+  sauvegarderJSON(FICHIER_NOTIFICATIONS, notifications);
   res.redirect("/admin/utilisateurs");
 });
 
