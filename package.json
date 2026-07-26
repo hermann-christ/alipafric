@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@getbrevo/brevo": "^6.0.2",
+    "archiver": "^8.0.0",
     "axios": "^1.18.1",
     "cloudinary": "^2.10.0",
     "dotenv": "^17.4.2",

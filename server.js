@@ -16,6 +16,7 @@ const multer = require("multer");
 const PDFDocument = require("pdfkit");
 const { MongoClient } = require("mongodb");
 const cloudinary = require("cloudinary").v2;
+const archiver = require("archiver");
 
 // 1. Déclarer l'application Express UNE SEULE FOIS
 const app = express();
@@ -2090,6 +2091,142 @@ app.use((err, req, res, next) => {
 });
 
 // ============================================================================
+// 16bis) NETTOYAGE AUTOMATIQUE : notifications anciennes + archivage des
+// fichiers de transactions de plus de 6 mois (envoyés par e-mail en zip,
+// puis supprimés de Cloudinary pour libérer de l'espace).
+// ============================================================================
+
+// Extrait { resourceType, publicId } d'une URL Cloudinary, pour pouvoir la supprimer.
+function extraireInfosCloudinary(url) {
+  if (!url || !url.startsWith("http")) return null;
+  const m = url.match(/\/([a-z]+)\/upload\/v\d+\/(.+)\.[a-zA-Z0-9]+(?:\?.*)?$/);
+  if (!m) return null;
+  return { resourceType: m[1], publicId: m[2] };
+}
+async function supprimerFichierCloudinary(url) {
+  const infos = extraireInfosCloudinary(url);
+  if (!infos) return;
+  try {
+    await cloudinary.uploader.destroy(infos.publicId, { resource_type: infos.resourceType });
+  } catch (erreur) {
+    console.error("Erreur suppression Cloudinary :", erreur.message);
+  }
+}
+function extensionDepuisURL(url, parDefaut) {
+  if (!url) return parDefaut;
+  const ext = url.split("?")[0].split(".").pop();
+  return ext && ext.length <= 5 ? ext : parDefaut;
+}
+
+// Envoi d'un e-mail avec pièce jointe via Brevo (le reste du fichier utilise
+// envoyerEmail(), sans pièce jointe, pour les autres notifications).
+async function envoyerEmailAvecPieceJointe(destinataire, sujet, contenuHTML, nomFichier, buffer) {
+  try {
+    await axios.post(
+      "https://api.brevo.com/v3/smtp/email",
+      {
+        sender: { name: process.env.SENDER_NAME || CONFIG.NOM_SITE, email: process.env.SENDER_EMAIL },
+        to: [{ email: destinataire }],
+        subject: sujet,
+        htmlContent: contenuHTML,
+        attachment: [{ content: buffer.toString("base64"), name: nomFichier }],
+      },
+      { headers: { accept: "application/json", "api-key": process.env.BREVO_API_KEY, "content-type": "application/json" } }
+    );
+    return true;
+  } catch (erreur) {
+    console.error("Erreur envoi e-mail avec pièce jointe :", erreur.response ? erreur.response.data : erreur.message);
+    return false;
+  }
+}
+
+const JOUR_MS = 24 * 3600 * 1000;
+
+async function nettoyageAutomatiqueQuotidien() {
+  try {
+    // 1. Suppression des notifications de plus de 3 mois (90 jours).
+    const seuilNotifs = Date.now() - 90 * JOUR_MS;
+    const avant = notifications.length;
+    notifications = notifications.filter((n) => new Date(n.date).getTime() >= seuilNotifs);
+    if (notifications.length !== avant) {
+      sauvegarderJSON(FICHIER_NOTIFICATIONS, notifications);
+      console.log(`🗑️  ${avant - notifications.length} notification(s) de plus de 3 mois supprimée(s).`);
+    }
+
+    // 2. Archivage des fichiers de transactions de plus de 6 mois (180 jours).
+    // Uniquement possible en mode Cloudinary (rien à libérer en mode local).
+    if (!CLOUDINARY_ACTIF) return;
+    const seuilFichiers = Date.now() - 180 * JOUR_MS;
+    const aArchiver = transactions.filter(
+      (t) =>
+        !t.archiveEnvoyee &&
+        new Date(t.dateCreation).getTime() < seuilFichiers &&
+        (t.alipayImage || t.imagePaiement || t.fichePDF || t.recuPDF)
+    );
+    if (aArchiver.length === 0) return;
+
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    const morceaux = [];
+    archive.on("data", (m) => morceaux.push(m));
+    const finPromesse = new Promise((resolve, reject) => {
+      archive.on("end", resolve);
+      archive.on("error", reject);
+    });
+
+    const champsAArchiver = [
+      ["alipayImage", "qr-alipay", "jpg"],
+      ["imagePaiement", "preuve-paiement", "jpg"],
+      ["fichePDF", "fiche-interne", "pdf"],
+      ["recuPDF", "recu-client", "pdf"],
+    ];
+    for (const t of aArchiver) {
+      for (const [champ, nom, extDefaut] of champsAArchiver) {
+        const ref = t[champ];
+        if (!ref) continue;
+        try {
+          const buffer = await bufferFichier(ref, DOSSIER_UPLOADS_PREUVES);
+          const extension = extensionDepuisURL(ref, extDefaut);
+          archive.append(buffer, { name: `${t.reference}/${nom}.${extension}` });
+        } catch (erreur) {
+          console.error(`Erreur récupération fichier ${champ} (${t.reference}) :`, erreur.message);
+        }
+      }
+    }
+    archive.finalize();
+    await finPromesse;
+    const bufferZip = Buffer.concat(morceaux);
+
+    const nomZip = `archive-${CONFIG.NOM_SITE.toLowerCase()}-${new Date().toISOString().slice(0, 10)}.zip`;
+    const envoye = await envoyerEmailAvecPieceJointe(
+      CONFIG.CONTACT_EMAIL,
+      `Archive automatique — ${aArchiver.length} transaction(s) de plus de 6 mois`,
+      `<p>Bonjour,</p><p>Voici l'archive des fichiers de <b>${aArchiver.length}</b> transaction(s) de plus de 6 mois, avant leur suppression de Cloudinary pour libérer de l'espace.</p><p>Références concernées : ${aArchiver.map((t) => t.reference).join(", ")}</p>`,
+      nomZip,
+      bufferZip
+    );
+
+    if (!envoye) {
+      console.error("⚠️  Archive non envoyée par e-mail : les fichiers ne seront PAS supprimés cette fois (nouvelle tentative demain).");
+      return;
+    }
+
+    // Suppression des fichiers Cloudinary + marquage comme archivé, seulement
+    // après confirmation que l'e-mail est bien parti.
+    for (const t of aArchiver) {
+      for (const [champ] of champsAArchiver) {
+        if (t[champ]) await supprimerFichierCloudinary(t[champ]);
+      }
+      t.archiveEnvoyee = true;
+      t.dateArchivage = new Date().toISOString();
+    }
+    sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
+    console.log(`📦 Archive envoyée par e-mail et fichiers Cloudinary libérés pour ${aArchiver.length} transaction(s).`);
+  } catch (erreur) {
+    console.error("Erreur pendant le nettoyage automatique quotidien :", erreur.message);
+  }
+}
+
+// ============================================================================
 // 17) DÉMARRAGE
 // ============================================================================
 async function demarrerServeur() {
@@ -2111,6 +2248,13 @@ async function demarrerServeur() {
       console.log(`   Admin : http://localhost:${CONFIG.PORT}/admin/connexion (identifiant/mot de passe définis dans .env)`);
     }
   });
+
+  // 4. Nettoyage automatique quotidien (notifications > 3 mois supprimées,
+  // fichiers de transactions > 6 mois archivés par e-mail puis libérés de
+  // Cloudinary). Premier passage 2 minutes après le démarrage, puis toutes
+  // les 24h.
+  setTimeout(() => nettoyageAutomatiqueQuotidien(), 2 * 60 * 1000);
+  setInterval(() => nettoyageAutomatiqueQuotidien(), JOUR_MS);
 }
 demarrerServeur();
 // Fonction d'envoi d'e-mail unique et réutilisable (utilisée par
