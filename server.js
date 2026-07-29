@@ -76,9 +76,15 @@ async function envoyerEmailTransaction(email, sujet, message) {
 const CONFIG = {
   NOM_SITE: "AlipAfric",
   TAGLINE: "RECHARGE. SIMPLIFIÉ.",
-  TAUX_CHANGE: 95, // 1 RMB = 95 F CFA
-  MONTANT_MIN_RMB: 100,
-  FRAIS_POURCENT: 0.5, // 0.5% de frais de service
+  // Grille tarifaire par palier : plus le client commande, plus le taux est
+  // avantageux. "seuilMax" = montant RMB maximum pour bénéficier de ce taux.
+  PALIERS_TAUX: [
+    { seuilMax: 99.99, taux: 95 },
+    { seuilMax: 999.99, taux: 93 },
+    { seuilMax: Infinity, taux: 92 },
+  ],
+  MONTANT_MIN_RMB: 50,
+  FRAIS_POURCENT: 0, // Frais de service désactivés
   PORT: process.env.PORT || 3000,
 
   // ⚠️ Changez ces identifiants avant de mettre le site en ligne.
@@ -89,6 +95,7 @@ const CONFIG = {
   ADMIN_MOT_DE_PASSE: process.env.ADMIN_MOT_DE_PASSE || "ChangezMoi123!",
 
   CONTACT_EMAIL: "sherlockgroup1@gmail.com",
+  NOM_TITULAIRE_COMPTE: "EDZI Hermann Christ",
   CONTACT_WHATSAPP: "22892908235",
 
   PAIEMENT: {
@@ -241,6 +248,23 @@ function ajouterNotification(utilisateurId, message, reference) {
 function genererReference() {
   return `AF-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
 }
+// Renvoie le taux F CFA/RMB applicable selon la grille tarifaire par palier
+// (plus le montant commandé est élevé, plus le taux est avantageux).
+function tauxPourMontant(montantRMB) {
+  const palier = CONFIG.PALIERS_TAUX.find((p) => montantRMB <= p.seuilMax);
+  return palier ? palier.taux : CONFIG.PALIERS_TAUX[CONFIG.PALIERS_TAUX.length - 1].taux;
+}
+// Génère le HTML de la grille tarifaire, affichable sur n'importe quelle page.
+function grilleTarifaireHTML() {
+  const lignes = CONFIG.PALIERS_TAUX
+    .map((p, i) => {
+      const min = i === 0 ? CONFIG.MONTANT_MIN_RMB : CONFIG.PALIERS_TAUX[i - 1].seuilMax + 0.01;
+      const label = p.seuilMax === Infinity ? `${Math.ceil(min)} RMB et plus` : `${Math.ceil(min)} à ${Math.floor(p.seuilMax)} RMB`;
+      return `<div class="ligne"><span>${label}</span><b>${p.taux} F CFA / Yuan</b></div>`;
+    })
+    .join("");
+  return `<div class="carte"><h2 style="margin-bottom:4px;">Grille tarifaire</h2><p class="souligne" style="margin-bottom:10px;">Plus vous achetez, plus le taux baisse !</p>${lignes}</div>`;
+}
 // toLocaleString("fr-FR") insère une espace INSÉCABLE (U+202F) comme séparateur
 // de milliers. La police par défaut de PDFKit ne l'affiche pas correctement
 // (d'où le "9 /548" au lieu de "9 548"). On utilise donc une espace normale.
@@ -374,7 +398,7 @@ function creerUpload(dossierDestination, typesAutorises, tailleMaxOctets) {
     },
   });
 }
-const uploadAlipay = creerUpload(DOSSIER_UPLOADS_ALIPAY, ["image/jpeg", "image/png", "image/jpg"], 5 * 1024 * 1024);
+const uploadAlipay = creerUpload(DOSSIER_UPLOADS_ALIPAY, ["image/jpeg", "image/png", "image/jpg"], 2 * 1024 * 1024);
 const uploadIdentite = creerUpload(
   DOSSIER_UPLOADS_IDENTITE,
   ["image/jpeg", "image/png", "image/jpg", "application/pdf"],
@@ -383,7 +407,7 @@ const uploadIdentite = creerUpload(
 const uploadPreuve = creerUpload(
   DOSSIER_UPLOADS_PREUVES,
   ["image/jpeg", "image/png", "image/jpg", "application/pdf"],
-  8 * 1024 * 1024
+  2 * 1024 * 1024
 );
 
 // ----------------------------------------------------------------------------
@@ -411,10 +435,18 @@ async function traiterFichierUploade(file, sousDossier) {
 }
 
 // Construit le lien à afficher (href) pour un fichier, quel que soit le mode.
-function hrefFichier(reference, dossierWeb) {
+function hrefFichier(reference, cheminWeb) {
   if (!reference) return null;
-  if (reference.startsWith("http")) return reference; // Cloudinary : URL déjà complète
-  return `/uploads/${dossierWeb}/${reference}`; // Mode local
+  if (reference.startsWith("http")) {
+    // Les PDF servis par Cloudinary en resource_type "raw" sont téléchargés
+    // automatiquement par défaut. On force l'ouverture directe dans le
+    // navigateur avec le flag fl_attachment:false.
+    if (reference.includes("/raw/upload/") && !reference.includes("fl_attachment")) {
+      return reference.replace("/raw/upload/", "/raw/upload/fl_attachment:false/");
+    }
+    return reference; // Cloudinary : URL déjà complète
+  }
+  return `/${cheminWeb}/${reference}`; // Mode local — cheminWeb = chemin complet après le "/" (ex: "uploads/identite", "recus", "fiches")
 }
 
 // Récupère les octets d'un fichier (pour la génération de PDF), quel que
@@ -462,6 +494,11 @@ async function genererEtStockerPDF(nomFichier, construirePDF, sousDossier, dossi
 // ----------------------------------------------------------------------------
 function page(titre, contenuHTML, options = {}) {
   const classeCarte = options.large ? "conteneur conteneur-large" : "conteneur";
+  const estAdmin = !!options.admin;
+  const manifeste = estAdmin ? "/manifest-admin.json" : "/manifest.json";
+  const iconePWA = estAdmin ? "/icons/icon-admin-192.png" : "/icons/icon-192.png";
+  const titrePWA = estAdmin ? "AlipAfric Admin" : "AlipAfric";
+  const couleurTheme = estAdmin ? "#781414" : "#1B1120";
   return `<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -469,6 +506,13 @@ function page(titre, contenuHTML, options = {}) {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${titre} — ${CONFIG.NOM_SITE}</title>
 <link rel="icon" type="image/png" href="/favicon.png?v=5">
+<link rel="manifest" href="${manifeste}">
+<meta name="theme-color" content="${couleurTheme}">
+<link rel="apple-touch-icon" href="${iconePWA}">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="${titrePWA}">
 <style>
   :root {
     --fond: #1B1120;
@@ -597,6 +641,7 @@ function page(titre, contenuHTML, options = {}) {
   .boite-paiement { background: var(--carte-claire); border-radius: 10px; padding: 14px 16px; margin-top: 12px; display: flex; flex-direction: column; }
   .boite-paiement small { display: block; color: var(--jaune-fonce); font-size: 11px; font-weight: 700; text-transform: uppercase; margin-bottom: 4px; }
   .boite-paiement b { display: block; width: 100%; font-size: 26px; font-weight: 800; letter-spacing: 0.02em; word-break: break-all; margin-bottom: 10px; }
+  .boite-paiement .nom-titulaire { display: block; font-size: 12.5px; color: var(--texte-att); margin-top: -6px; margin-bottom: 10px; }
   .btn-copier { align-self: flex-end; background: var(--bleu); border: none; color: #fff; border-radius: 8px; padding: 6px 14px; cursor: pointer; font-size: 12px; font-weight: 700; }
   h1#formulaire { scroll-margin-top: 20px; }
   .moyen-option { display: flex; align-items: center; gap: 10px; background: var(--carte-claire); border: 1px solid var(--bordure); border-radius: 10px; padding: 2px 14px; margin-bottom: 8px; text-transform: none; cursor: pointer; transition: background 0.15s, border-color 0.15s; }
@@ -647,6 +692,7 @@ function page(titre, contenuHTML, options = {}) {
   <div class="${classeCarte}">
     ${contenuHTML}
   </div>
+  <button id="btnInstallerApp" class="bouton jaune" style="display:none; position:fixed; bottom:18px; right:18px; left:auto; width:auto; margin:0; padding:12px 18px; z-index:999; box-shadow:0 6px 18px rgba(0,0,0,0.45); border-radius:999px;">📲 Installer l'application</button>
   <script>
     function copierTexte(id) {
       const el = document.getElementById(id);
@@ -657,6 +703,37 @@ function page(titre, contenuHTML, options = {}) {
       btn.textContent = "Copié !";
       setTimeout(() => { btn.textContent = original; }, 1500);
     }
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("/sw.js").catch(() => {});
+      });
+    }
+
+    // Bouton d'installation visible directement sur le site (pas seulement
+    // dans la barre d'adresse du navigateur).
+    let promptInstallDiffere = null;
+    const btnInstaller = document.getElementById('btnInstallerApp');
+    const dejaInstallee = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      promptInstallDiffere = e;
+      if (btnInstaller && !dejaInstallee) btnInstaller.style.display = 'block';
+    });
+
+    if (btnInstaller) {
+      btnInstaller.addEventListener('click', async () => {
+        if (!promptInstallDiffere) return;
+        promptInstallDiffere.prompt();
+        await promptInstallDiffere.userChoice;
+        promptInstallDiffere = null;
+        btnInstaller.style.display = 'none';
+      });
+    }
+
+    window.addEventListener('appinstalled', () => {
+      if (btnInstaller) btnInstaller.style.display = 'none';
+    });
   </script>
 </body>
 </html>`;
@@ -723,7 +800,7 @@ function enTeteEtHero() {
     </header>
 
     <section class="hero">
-      <h1>Rechargez votre <span>Alipay</span> depuis le Togo, en toute confiance</h1>
+      <h1>Rechargez votre <span>Alipay</span> depuis l'Afrique, en toute confiance</h1>
       <p>Envoyez vos F CFA, nous rechargeons votre compte Alipay en RMB. Rapide, suivi de bout en bout, et vérifié.</p>
       <div class="cta-rangee">
         <a class="bouton jaune" href="/inscription#formulaire">Commencer maintenant</a>
@@ -732,8 +809,9 @@ function enTeteEtHero() {
     </section>
 
     <div class="taux-boite">
-      <span>Taux de change</span>
-      <b>1 RMB = ${CONFIG.TAUX_CHANGE} F CFA</b>
+      <span>Le Yuan à partir de</span>
+      <b>93 F CFA</b>
+      <span style="display:block; margin-top:6px; text-transform:none; letter-spacing:0; font-size:14.5px; font-weight:700; color:var(--jaune);">Plus vous achetez, plus le taux baisse !</span>
     </div>
   `;
 }
@@ -838,7 +916,7 @@ app.get("/conditions-utilisation", (req, res) => {
       <p><b>Droit de refus :</b> Le Prestataire se réserve le droit de refuser, suspendre ou annuler toute transaction dont le numéro payeur ne correspond pas à l'identité déclarée du Client, ou en cas de doute sur l'origine des fonds.</p>
 
       <h3>ARTICLE 4 : TARIF, TAUX ET MODALITÉS DE PAIEMENT</h3>
-      <p><b>Transparence des Prix :</b> Les tarifs applicables, exprimés en Francs CFA (XOF), incluent le coût de la conversion en Yuans (CNY), ainsi que les frais de service et d'intermédiation du Prestataire.</p>
+      <p><b>Transparence des Prix :</b> Les tarifs applicables, exprimés en Francs CFA (XOF), correspondent au taux de change en vigueur en Yuans (CNY), sans frais de service additionnels.</p>
       <p><b>Fluctuation des Taux :</b> Les taux d'intermédiation appliqués peuvent être révisés à tout moment en fonction des variations du marché financier et des frais d'opération. Le taux applicable est celui affiché ou confirmé au Client au moment de la validation de sa commande.</p>
       <p><b>Modalités de Règlement :</b> Toute prestation est payable 100 % d'avance par Mobile Money (T-Money, Moov Money, Wave, Orange Money, etc.) ou par virement bancaire sur les comptes officiels indiqués par le Prestataire.</p>
 
@@ -1133,7 +1211,7 @@ app.get("/compte", exigerConnexion, exigerEmailVerifie, (req, res) => {
     banniere = `<div class="banniere banniere-erreur">${u.raisonRefus || MESSAGE_REFUS_IDENTITE}<a class="bouton danger" href="/compte/profil">Mettre à jour mon profil</a></div>`;
   }
 
-  const mesTransactions = transactions.filter((t) => t.utilisateurId === u.id).slice(-3).reverse();
+  const mesTransactions = transactions.filter((t) => t.utilisateurId === u.id).slice(-2).reverse();
   const activites = mesTransactions
     .map((t) => {
       const s = statutTransactionAffiche(t.statut);
@@ -1147,8 +1225,8 @@ app.get("/compte", exigerConnexion, exigerEmailVerifie, (req, res) => {
     <p class="souligne">Ravi de vous revoir sur ${CONFIG.NOM_SITE}.</p>
     ${banniere}
     <div class="taux-boite">
-      <span>Taux de change</span>
-      <b>1 RMB = ${CONFIG.TAUX_CHANGE} F CFA</b>
+      <span>Le Yuan à partir de</span>
+      <b>93 F CFA</b>
     </div>
     ${u.statutVerification === "verifie" ? `<a class="bouton jaune" href="/compte/nouvelle-demande">Recharger mon Alipay</a>` : ""}
     <div class="carte" style="margin-top:18px;">
@@ -1335,34 +1413,66 @@ app.get("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerV
     ${entete("accueil", req.utilisateur)}
     ${stepper(1, ETAPES)}
     <h1>Recharger mon Alipay</h1>
-    <p class="souligne">Minimum : ${CONFIG.MONTANT_MIN_RMB} RMB (${(CONFIG.MONTANT_MIN_RMB * CONFIG.TAUX_CHANGE).toLocaleString("fr-FR")} F CFA)</p>
+    <p class="souligne">Minimum : ${CONFIG.MONTANT_MIN_RMB} RMB</p>
     <div class="carte">
       <form method="POST" action="/compte/nouvelle-demande" enctype="multipart/form-data">
         <label for="montantRMB">Montant à recevoir sur Alipay (RMB)</label>
         <input type="number" id="montantRMB" name="montantRMB" min="${CONFIG.MONTANT_MIN_RMB}" step="0.01" required oninput="majApercu()">
-        <p class="souligne" id="apercuMontant" style="margin:6px 0 0;">Taux indicatif : 1 RMB ≈ ${CONFIG.TAUX_CHANGE} F CFA</p>
+        <p class="souligne" id="apercuMontant" style="margin:6px 0 0;">Indiquez un montant pour voir le taux et le total.</p>
+        <p id="astuceMontant" style="display:none; background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.3); color: #FBBF6B; border-radius: 8px; padding: 8px 12px; font-size: 12.5px; margin: 8px 0 0;"></p>
 
         <label for="alipayImage">Code QR de votre profil Alipay</label>
+        <div class="avertissement">⚠️ Le compte Alipay doit être <b>vérifié</b>, sinon Alipay peut bloquer les fonds et ${CONFIG.NOM_SITE} ne pourra pas intervenir.</div>
         <div class="zone-fichier">
           <input type="file" id="alipayImage" name="alipayImage" accept="image/*" required>
-          <p class="indice">Ouvrez Alipay → recevoir de l'argent → capture du QR code</p>
+          <p class="indice">Ouvrez Alipay → recevoir de l'argent → capture du QR code (max 2 Mo)</p>
         </div>
         <button type="submit">Continuer</button>
       </form>
     </div>
     <script>
+      const PALIERS = ${JSON.stringify(CONFIG.PALIERS_TAUX)};
+      const FRAIS_POURCENT = ${CONFIG.FRAIS_POURCENT};
+
+      function tauxPour(montant) {
+        for (const p of PALIERS) if (montant <= p.seuilMax) return p;
+        return PALIERS[PALIERS.length - 1];
+      }
+
       function majApercu() {
-        const taux = ${CONFIG.TAUX_CHANGE};
-        const frais = ${CONFIG.FRAIS_POURCENT};
         const v = parseFloat(document.getElementById('montantRMB').value);
         const apercu = document.getElementById('apercuMontant');
-        if (!v || v <= 0) { apercu.textContent = 'Taux indicatif : 1 RMB ≈ ' + taux + ' F CFA'; return; }
-        const cfa = Math.round(v * taux);
-        const fraisXOF = Math.round(cfa * frais / 100);
+        const astuce = document.getElementById('astuceMontant');
+        if (!v || v <= 0) {
+          apercu.textContent = 'Indiquez un montant pour voir le taux et le total.';
+          astuce.style.display = 'none';
+          return;
+        }
+        const palier = tauxPour(v);
+        const cfa = Math.round(v * palier.taux);
+        const fraisXOF = Math.round(cfa * FRAIS_POURCENT / 100);
         const total = cfa + fraisXOF;
-        apercu.textContent = 'Montant à payer : ' + total.toLocaleString('fr-FR') + ' F CFA (frais de ' + frais + '% inclus)';
+        apercu.textContent = 'Taux : ' + palier.taux + ' F CFA/Yuan — Total : ' + total.toLocaleString('fr-FR') + ' F CFA'
+          + (FRAIS_POURCENT > 0 ? ' (frais de ' + FRAIS_POURCENT + '% inclus)' : ' (aucun frais de service)');
+
+        // Astuce incitative : si un palier meilleur existe juste au-dessus.
+        const indexActuel = PALIERS.indexOf(palier);
+        const palierSuivant = PALIERS[indexActuel + 1];
+        if (palierSuivant) {
+          const seuilProchain = palier.seuilMax + 0.01;
+          const manque = Math.ceil(seuilProchain - v);
+          if (manque > 0 && manque <= 150) {
+            astuce.style.display = 'block';
+            astuce.textContent = '💡 Astuce : ajoutez encore ' + manque + ' RMB pour débloquer le tarif préférentiel à ' + palierSuivant.taux + ' F CFA/Yuan !';
+          } else {
+            astuce.style.display = 'none';
+          }
+        } else {
+          astuce.style.display = 'none';
+        }
       }
     </script>
+    ${grilleTarifaireHTML()}
   `;
   res.send(page("Nouvelle recharge", contenu));
 });
@@ -1403,6 +1513,7 @@ app.post("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exiger
 
         <button type="submit">Continuer</button>
       </form>
+      <a class="lien-discret" href="javascript:history.back()">← Précédent</a>
     </div>
     <script>
       function selectionnerMoyen(labelClique) {
@@ -1456,7 +1567,8 @@ app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exiger
     return res.status(400).send(page("Erreur", `<h1>Nom invalide</h1><p class="souligne">Merci d'indiquer le nom complet du compte utilisé pour le dépôt.</p><a href="/compte/nouvelle-demande">← Recommencer</a>`));
   }
 
-  const montantCFA = Math.round(montant * CONFIG.TAUX_CHANGE);
+  const tauxApplique = tauxPourMontant(montant);
+  const montantCFA = Math.round(montant * tauxApplique);
   const frais = Math.round((montantCFA * CONFIG.FRAIS_POURCENT) / 100);
   const total = montantCFA + frais;
 
@@ -1466,16 +1578,16 @@ app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exiger
     <h1>Confirmation</h1>
     <div class="carte">
       <div class="ligne"><span>Service</span><b>Alipay</b></div>
-      <div class="ligne"><span>Taux appliqué</span><b>1 RMB = ${CONFIG.TAUX_CHANGE} XOF</b></div>
+      <div class="ligne"><span>Taux appliqué</span><b>1 RMB = ${tauxApplique} XOF</b></div>
       <div class="ligne"><span>Le bénéficiaire reçoit</span><b>${montant} RMB</b></div>
-      <div class="ligne"><span>Frais de service (${CONFIG.FRAIS_POURCENT}%)</span><b>+ ${frais.toLocaleString("fr-FR")} XOF</b></div>
+      ${frais > 0 ? `<div class="ligne"><span>Frais de service (${CONFIG.FRAIS_POURCENT}%)</span><b>+ ${frais.toLocaleString("fr-FR")} XOF</b></div>` : ""}
       <div class="ligne"><span>Via</span><b>${info.nom}</b></div>
       <div class="ligne"><span>Numéro utilisé pour le dépôt</span><b>${numeroExpediteur}</b></div>
       <div class="ligne"><span>Total à payer</span><b style="font-size:18px; color:var(--jaune);">${total.toLocaleString("fr-FR")} XOF</b></div>
 
       <p class="souligne" style="margin:14px 0 0;">Voici le numéro sur lequel il faut transférer les fonds :</p>
       <div class="boite-paiement">
-        <div><small>${info.nom}</small><b id="numero-tmp">${info.numero}</b></div>
+        <div><small>${info.nom}</small><b id="numero-tmp">${info.numero}</b><span class="nom-titulaire">Titulaire : ${CONFIG.NOM_TITULAIRE_COMPTE}</span></div>
         <button type="button" class="btn-copier" onclick="copierTexte('numero-tmp')">Copier</button>
       </div>
       ${info.noteFrais ? `<div class="avertissement">⚠️ Important : ne pas ajouter les frais de retrait lors de votre dépôt.</div>` : ""}
@@ -1491,6 +1603,7 @@ app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exiger
         </label>
         <button type="submit" class="jaune">J'ai payé</button>
       </form>
+      <a class="lien-discret" href="javascript:history.back()">← Précédent</a>
     </div>
   `;
   res.send(page("Confirmation", contenu));
@@ -1508,7 +1621,8 @@ app.post("/compte/finaliser-commande", exigerConnexion, exigerEmailVerifie, exig
     return res.status(400).send(page("Erreur", `<h1>Acceptation des CGU/CGV requise</h1><p class="souligne">Vous devez cocher la case d'acceptation des Conditions Générales d'Utilisation et de Vente pour valider votre paiement.</p><a href="/compte/nouvelle-demande">← Recommencer</a>`));
   }
 
-  const montantCFA = Math.round(montant * CONFIG.TAUX_CHANGE);
+  const tauxApplique = tauxPourMontant(montant);
+  const montantCFA = Math.round(montant * tauxApplique);
   const frais = Math.round((montantCFA * CONFIG.FRAIS_POURCENT) / 100);
   const total = montantCFA + frais;
   const reference = genererReference();
@@ -1521,6 +1635,7 @@ app.post("/compte/finaliser-commande", exigerConnexion, exigerEmailVerifie, exig
     prenomNomComplet: `${req.utilisateur.prenom || ""} ${req.utilisateur.nom || ""}`.trim(),
     alipayImage,
     montantRMB: montant,
+    tauxApplique,
     montantCFA,
     frais,
     total,
@@ -1555,15 +1670,15 @@ app.get("/compte/transactions/:reference", exigerConnexion, exigerEmailVerifie, 
       <h1>Confirmation</h1>
       <div class="carte">
         <div class="ligne"><span>Service</span><b>Alipay</b></div>
-        <div class="ligne"><span>Taux appliqué</span><b>1 RMB = ${CONFIG.TAUX_CHANGE} XOF</b></div>
+        <div class="ligne"><span>Taux appliqué</span><b>1 RMB = ${t.tauxApplique || CONFIG.PALIERS_TAUX[CONFIG.PALIERS_TAUX.length - 1].taux} XOF</b></div>
         <div class="ligne"><span>Le bénéficiaire reçoit</span><b>${t.montantRMB} RMB</b></div>
-        <div class="ligne"><span>Frais de service (${CONFIG.FRAIS_POURCENT}%)</span><b>+ ${t.frais.toLocaleString("fr-FR")} XOF</b></div>
+        ${t.frais > 0 ? `<div class="ligne"><span>Frais de service</span><b>+ ${t.frais.toLocaleString("fr-FR")} XOF</b></div>` : ""}
         <div class="ligne"><span>Via</span><b>${info.nom}</b></div>
         <div class="ligne"><span>Total à payer</span><b style="font-size:18px; color:var(--jaune);">${t.total.toLocaleString("fr-FR")} XOF</b></div>
 
         <p class="souligne" style="margin:14px 0 0;">Voici le numéro sur lequel il faut transférer les fonds :</p>
         <div class="boite-paiement">
-          <div><small>${info.nom}</small><b id="numero-${t.reference}">${info.numero}</b></div>
+          <div><small>${info.nom}</small><b id="numero-${t.reference}">${info.numero}</b><span class="nom-titulaire">Titulaire : ${CONFIG.NOM_TITULAIRE_COMPTE}</span></div>
           <button type="button" class="btn-copier" onclick="copierTexte('numero-${t.reference}')">Copier</button>
         </div>
         ${info.noteFrais ? `<div class="avertissement">⚠️ Important : ne pas ajouter les frais de retrait lors de votre dépôt.</div>` : ""}
@@ -1631,7 +1746,7 @@ app.get("/compte/transactions/:reference/preuve", exigerConnexion, exigerEmailVe
         <label for="imagePaiement">Preuve de paiement (reçu / capture d'écran)</label>
         <div class="zone-fichier">
           <input type="file" id="imagePaiement" name="imagePaiement" accept=".jpg,.jpeg,.png,.pdf" required>
-          <p class="indice">JPEG, PNG ou PDF (Max 8 Mo)</p>
+          <p class="indice">JPEG, PNG ou PDF (Max 2 Mo)</p>
         </div>
         <button type="submit">Confirmer</button>
       </form>
@@ -1779,17 +1894,22 @@ async function genererFichePDF(t) {
       doc.text(`Total XOF : ${formaterFCFA(t.total)} F CFA`);
       doc.text(`Moyen de paiement : ${CONFIG.PAIEMENT[t.moyenPaiement]?.nom || t.moyenPaiement}`);
       doc.text(`Statut : ${t.statut}`);
-      doc.moveDown();
+
+      // QR Alipay et preuve de paiement côte à côte, sur la même page.
+      doc.moveDown(1);
+      const yImages = doc.y;
+      const largeurColonne = 240;
+      const xGauche = 50;
+      const xDroite = 595.28 - 50 - largeurColonne;
+      const hauteurMax = 420;
+
       if (bufferAlipay) {
-        doc.fontSize(13).fillColor("#2563EB").text("QR Alipay du client");
-        doc.moveDown(0.3);
-        try { doc.image(bufferAlipay, { fit: [480, 550], align: "center" }); } catch (e) {}
+        doc.fontSize(11).fillColor("#2563EB").text("QR Alipay du client", xGauche, yImages, { width: largeurColonne, align: "center" });
+        try { doc.image(bufferAlipay, xGauche, yImages + 16, { fit: [largeurColonne, hauteurMax], align: "center" }); } catch (e) {}
       }
       if (bufferPreuve) {
-        doc.addPage();
-        doc.fontSize(13).fillColor("#2563EB").text("Preuve de paiement");
-        doc.moveDown(0.3);
-        try { doc.image(bufferPreuve, { fit: [480, 650], align: "center" }); } catch (e) {}
+        doc.fontSize(11).fillColor("#2563EB").text("Preuve de paiement", xDroite, yImages, { width: largeurColonne, align: "center" });
+        try { doc.image(bufferPreuve, xDroite, yImages + 16, { fit: [largeurColonne, hauteurMax], align: "center" }); } catch (e) {}
       }
     },
     "fiches",
@@ -1858,12 +1978,12 @@ app.get("/admin/connexion", (req, res) => {
       </form>
     </div>
   `;
-  res.send(page("Connexion admin", contenu));
+  res.send(page("Connexion admin", contenu, { admin: true }));
 });
 app.post("/admin/connexion", (req, res) => {
   const { identifiant, motDePasse } = req.body;
   if (identifiant !== CONFIG.ADMIN_IDENTIFIANT || motDePasse !== CONFIG.ADMIN_MOT_DE_PASSE) {
-    return res.status(401).send(page("Erreur", `<h1>Identifiant ou mot de passe incorrect</h1><a href="/admin/connexion">← Réessayer</a>`));
+    return res.status(401).send(page("Erreur", `<h1>Identifiant ou mot de passe incorrect</h1><a href="/admin/connexion">← Réessayer</a>`, { admin: true }));
   }
   connecterAdmin(res);
   res.redirect("/admin");
@@ -1885,13 +2005,13 @@ app.get("/admin", exigerAdmin, (req, res) => {
       <a href="/admin/deconnexion">Déconnexion</a>
     </div>
   `;
-  res.send(page("Admin", contenu, { large: true }));
+  res.send(page("Admin", contenu, { large: true, admin: true }));
 });
 
 app.get("/admin/utilisateurs", exigerAdmin, (req, res) => {
   const lignes = [...utilisateurs].reverse().map((u) => {
     const estPdf = u.pieceIdentiteEstPdf ?? (u.pieceIdentite && u.pieceIdentite.toLowerCase().endsWith(".pdf"));
-    const lienPiece = hrefFichier(u.pieceIdentite, "identite");
+    const lienPiece = hrefFichier(u.pieceIdentite, "uploads/identite");
     const image = !u.pieceIdentite ? "—" : estPdf
       ? `<a href="${lienPiece}" target="_blank">📄 PDF</a>`
       : `<a href="${lienPiece}" target="_blank"><img class="miniature" src="${lienPiece}"></a>`;
@@ -1917,11 +2037,19 @@ app.get("/admin/utilisateurs", exigerAdmin, (req, res) => {
     <p class="souligne">Les comptes supprimés par leurs propriétaires restent visibles ici (accès révoqué mais données archivées).</p>
     ${utilisateurs.length === 0 ? `<p class="aucune-donnee">Aucun compte.</p>` : `<table class="admin"><thead><tr><th>Pièce</th><th>E-mail</th><th>Infos</th><th>Statut</th><th>Action</th></tr></thead><tbody>${lignes}</tbody></table>`}
   `;
-  res.send(page("Comptes clients", contenu, { large: true }));
+  res.send(page("Comptes clients", contenu, { large: true, admin: true }));
 });
 app.post("/admin/utilisateurs/:id/verifier", exigerAdmin, (req, res) => {
   const u = utilisateurs.find((x) => x.id === req.params.id);
-  if (u) { u.statutVerification = "verifie"; sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs); }
+  if (u) {
+    u.statutVerification = "verifie";
+    sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
+    envoyerEmail(
+      u.identifiant,
+      `${CONFIG.NOM_SITE} — votre compte est vérifié ✔`,
+      `<p>Bonjour ${u.prenom || u.pseudo},</p><p>Bonne nouvelle : votre profil et votre pièce d'identité ont été vérifiés avec succès.</p><p>Vous pouvez dès à présent effectuer vos transactions de recharge Alipay sur ${CONFIG.NOM_SITE}.</p>`
+    ).catch((err) => console.error("Erreur e-mail vérification compte :", err.message));
+  }
   res.redirect("/admin/utilisateurs");
 });
 app.post("/admin/utilisateurs/:id/refuser", exigerAdmin, (req, res) => {
@@ -1963,7 +2091,7 @@ app.get("/admin/utilisateurs/:id/supprimer-definitivement", exigerAdmin, (req, r
     </form>
     <a class="lien-discret" href="/admin/utilisateurs">← Annuler</a>
   `;
-  res.send(page("Suppression définitive", contenu, { large: true }));
+  res.send(page("Suppression définitive", contenu, { large: true, admin: true }));
 });
 app.post("/admin/utilisateurs/:id/supprimer-definitivement", exigerAdmin, (req, res) => {
   const idCible = req.params.id;
@@ -1989,13 +2117,13 @@ app.get("/admin/transactions", exigerAdmin, (req, res) => {
   }
 
   const lignes = listeFiltree.reverse().map((t) => {
-    const lienAlipay = hrefFichier(t.alipayImage, "alipay");
+    const lienAlipay = hrefFichier(t.alipayImage, "uploads/alipay");
     const imgAlipay = t.alipayImage ? `<a href="${lienAlipay}" target="_blank"><img class="miniature" src="${lienAlipay}"></a>` : "—";
     const estPdf = t.imagePaiementEstPdf ?? (t.imagePaiement && t.imagePaiement.toLowerCase().endsWith(".pdf"));
-    const lienPreuve = hrefFichier(t.imagePaiement, "preuves");
+    const lienPreuve = hrefFichier(t.imagePaiement, "uploads/preuves");
     const imgPreuve = !t.imagePaiement ? "—" : estPdf ? `<a href="${lienPreuve}" target="_blank">📄 PDF</a>` : `<a href="${lienPreuve}" target="_blank"><img class="miniature" src="${lienPreuve}"></a>`;
     const heurePreuve = t.datePreuve ? new Date(t.datePreuve).toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
-    const fiche = t.fichePDF ? `<a href="${hrefFichier(t.fichePDF, "fiches")}" target="_blank">📄</a>` : "—";
+    const fiche = `${t.fichePDF ? `<a href="${hrefFichier(t.fichePDF, "fiches")}" target="_blank">📄</a>` : "—"} <form style="display:inline" method="POST" action="/admin/transactions/${t.reference}/regenerer-fiche"><button class="mini-bouton info" style="padding:2px 6px; font-size:11px;" title="Régénérer la fiche">↻</button></form>`;
     let actions = "";
     if (t.statut === "preuve_recue") {
       actions = `<form style="display:inline" method="POST" action="/admin/transactions/${t.reference}/confirmer-paiement"><button class="mini-bouton info">Confirmer</button></form>
@@ -2027,9 +2155,36 @@ app.get("/admin/transactions", exigerAdmin, (req, res) => {
     ${listeFiltree.length === 0 ? `<p class="aucune-donnee">Aucune transaction.</p>` : `<table class="admin"><thead><tr><th>QR Alipay</th><th>Réf</th><th>Client</th><th>Total</th><th>RMB</th><th>N° dépôt</th><th>Preuve</th><th>Heure</th><th>Moyen</th><th>Statut</th><th>Fiche</th><th>Action</th></tr></thead><tbody>${lignes}</tbody></table>`}
     <p class="souligne" style="margin-top:16px;">Export : <a href="/admin/transactions.json">/admin/transactions.json</a></p>
   `;
-  res.send(page("Transactions", contenu, { large: true }));
+  res.send(page("Transactions", contenu, { large: true, admin: true }));
 });
 app.get("/admin/transactions.json", exigerAdmin, (req, res) => res.json(transactions));
+
+app.post("/admin/transactions/:reference/regenerer-fiche", exigerAdmin, async (req, res) => {
+  const t = transactions.find((x) => x.reference === req.params.reference);
+  if (!t) return res.redirect("/admin/transactions");
+  try {
+    const { reference } = await genererFichePDF(t);
+    t.fichePDF = reference;
+    sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
+    res.redirect("/admin/transactions");
+  } catch (erreur) {
+    console.error("Erreur régénération fiche :", erreur.message);
+    res.status(500).send(page("Erreur", `<h1>Échec de la régénération</h1><p class="souligne">${erreur.message}</p><a href="/admin/transactions">← Retour</a>`, { admin: true }));
+  }
+});
+app.post("/admin/transactions/:reference/regenerer-recu", exigerAdmin, async (req, res) => {
+  const t = transactions.find((x) => x.reference === req.params.reference);
+  if (!t) return res.redirect("/admin/transactions");
+  try {
+    const { reference } = await genererRecuClient(t);
+    t.recuPDF = reference;
+    sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
+    res.redirect("/admin/transactions");
+  } catch (erreur) {
+    console.error("Erreur régénération reçu :", erreur.message);
+    res.status(500).send(page("Erreur", `<h1>Échec de la régénération</h1><p class="souligne">${erreur.message}</p><a href="/admin/transactions">← Retour</a>`, { admin: true }));
+  }
+});
 
 app.post("/admin/transactions/:reference/confirmer-paiement", exigerAdmin, async (req, res) => {
   const t = transactions.find((x) => x.reference === req.params.reference);
@@ -2064,9 +2219,11 @@ app.post("/admin/transactions/:reference/confirmer-recharge", exigerAdmin, async
     try {
       const { reference: refFiche } = await genererFichePDF(t);
       t.fichePDF = refFiche;
+    } catch (e) { console.error("Erreur génération fiche interne :", e.message); }
+    try {
       const { reference: refRecu } = await genererRecuClient(t);
       t.recuPDF = refRecu;
-    } catch (e) { console.error(e.message); }
+    } catch (e) { console.error("Erreur génération reçu client :", e.message); }
     sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
     ajouterNotification(t.utilisateurId, `Votre compte Alipay a été crédité de ${t.montantRMB} RMB ✔ Transaction terminée.`, t.reference);
   }
