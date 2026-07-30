@@ -17,9 +17,20 @@ const PDFDocument = require("pdfkit");
 const { MongoClient } = require("mongodb");
 const cloudinary = require("cloudinary").v2;
 const archiver = require("archiver");
+const webpush = require("web-push");
 
 // 1. Déclarer l'application Express UNE SEULE FOIS
 const app = express();
+
+// Filet de sécurité : une erreur oubliée quelque part ne doit jamais faire
+// planter tout le serveur (les versions récentes de Node.js arrêtent le
+// process par défaut sur une promesse rejetée non gérée).
+process.on("unhandledRejection", (raison) => {
+  console.error("⚠️  Promesse rejetée non gérée :", raison);
+});
+process.on("uncaughtException", (erreur) => {
+  console.error("⚠️  Exception non rattrapée :", erreur);
+});
 
 // 2. Servir le dossier public
 app.use(express.static(path.join(__dirname, 'public')));
@@ -138,6 +149,7 @@ const DOSSIER_LOGOS = path.join(__dirname, "public", "logos"); // logos des moye
 const FICHIER_UTILISATEURS = path.join(__dirname, "utilisateurs.json");
 const FICHIER_TRANSACTIONS = path.join(__dirname, "transactions.json");
 const FICHIER_NOTIFICATIONS = path.join(__dirname, "notifications.json");
+const FICHIER_ABONNEMENTS_PUSH = path.join(__dirname, "abonnements-push.json");
 
 // Association "chemin de fichier local" -> "nom de collection MongoDB".
 // On garde les mêmes noms de constantes (FICHIER_UTILISATEURS, etc.) dans
@@ -147,6 +159,7 @@ const NOM_COLLECTION = {
   [FICHIER_UTILISATEURS]: "utilisateurs",
   [FICHIER_TRANSACTIONS]: "transactions",
   [FICHIER_NOTIFICATIONS]: "notifications",
+  [FICHIER_ABONNEMENTS_PUSH]: "abonnementsPush",
 };
 
 // ----------------------------------------------------------------------------
@@ -177,6 +190,45 @@ if (CLOUDINARY_ACTIF) {
   console.log("✅ Cloudinary configuré — les fichiers uploadés sont persistants.");
 } else {
   console.warn("⚠️  CLOUDINARY non configuré : les fichiers uploadés resteront sur le disque local (NON persistants sur Render). Voir .env.");
+}
+
+// ----------------------------------------------------------------------------
+// Notifications push (PC + téléphone) pour l'admin : nouveau compte à
+// vérifier, nouvelle preuve de paiement reçue.
+// ----------------------------------------------------------------------------
+const PUSH_ACTIF = !!(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY);
+if (PUSH_ACTIF) {
+  webpush.setVapidDetails(
+    `mailto:${CONFIG.CONTACT_EMAIL}`,
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  );
+  console.log("✅ Notifications push configurées.");
+} else {
+  console.warn("⚠️  VAPID non configuré : pas de notifications push. Voir .env.");
+}
+let abonnementsPush = [];
+
+async function envoyerNotificationPush(titre, corps, url) {
+  if (!PUSH_ACTIF || abonnementsPush.length === 0) return;
+  const charge = JSON.stringify({ titre, corps, url: url || "/admin" });
+  const abonnementsValides = [];
+  for (const abonnement of abonnementsPush) {
+    try {
+      await webpush.sendNotification(abonnement, charge);
+      abonnementsValides.push(abonnement);
+    } catch (erreur) {
+      // 410/404 = abonnement expiré ou désinstallé, on l'oublie silencieusement.
+      if (erreur.statusCode !== 410 && erreur.statusCode !== 404) {
+        console.error("Erreur envoi notification push :", erreur.message);
+        abonnementsValides.push(abonnement);
+      }
+    }
+  }
+  if (abonnementsValides.length !== abonnementsPush.length) {
+    abonnementsPush = abonnementsValides;
+    sauvegarderJSON(FICHIER_ABONNEMENTS_PUSH, abonnementsPush);
+  }
 }
 
 async function connecterMongo() {
@@ -1227,6 +1279,7 @@ app.get("/compte", exigerConnexion, exigerEmailVerifie, (req, res) => {
     <div class="taux-boite">
       <span>Le Yuan à partir de</span>
       <b>93 F CFA</b>
+      <span style="display:block; margin-top:6px; text-transform:none; letter-spacing:0; font-size:14.5px; font-weight:700; color:var(--jaune);">Plus vous achetez, plus le taux baisse !</span>
     </div>
     ${u.statutVerification === "verifie" ? `<a class="bouton jaune" href="/compte/nouvelle-demande">Recharger mon Alipay</a>` : ""}
     <div class="carte" style="margin-top:18px;">
@@ -1340,7 +1393,13 @@ app.post("/compte/profil", exigerConnexion, exigerEmailVerifie, uploadIdentite.s
   if (!nom || !prenom || !indicatif || !numeroTelephone || !piece) {
     return res.status(400).send(page("Erreur", `<h1>Merci de remplir tous les champs</h1><a href="/compte/profil">← Retour</a>`));
   }
-  const { reference, estPdf } = await traiterFichierUploade(piece, "identite");
+  let reference, estPdf;
+  try {
+    ({ reference, estPdf } = await traiterFichierUploade(piece, "identite"));
+  } catch (erreur) {
+    console.error("Erreur upload pièce d'identité :", erreur.message);
+    return res.status(500).send(page("Erreur", `<h1>Échec de l'envoi du fichier</h1><p class="souligne">Le service de stockage a rencontré un problème. Merci de réessayer dans un instant.</p><a href="/compte/profil">← Réessayer</a>`));
+  }
   u.nom = nom;
   u.prenom = prenom;
   u.telephone = `${indicatif} ${numeroTelephone}`;
@@ -1351,6 +1410,11 @@ app.post("/compte/profil", exigerConnexion, exigerEmailVerifie, uploadIdentite.s
   // renseigné. C'est la pièce d'identité qui est vérifiée par l'admin.
   u.statutVerification = "en_attente";
   sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
+  envoyerNotificationPush(
+    "Nouveau compte à vérifier",
+    `${prenom} ${nom} attend une vérification d'identité.`,
+    "/admin/utilisateurs"
+  ).catch(() => {});
   res.redirect("/compte");
 });
 
@@ -1409,6 +1473,8 @@ function exigerVerifie(req, res, next) {
 const ETAPES = ["Montant & QR", "Moyen de paiement", "Confirmation"];
 
 app.get("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerVerifie, (req, res) => {
+  const montantPrecedent = req.query.montantRMB || "";
+  const imagePrecedente = req.query.alipayImage || "";
   const contenu = `
     ${entete("accueil", req.utilisateur)}
     ${stepper(1, ETAPES)}
@@ -1417,16 +1483,18 @@ app.get("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerV
     <div class="carte">
       <form method="POST" action="/compte/nouvelle-demande" enctype="multipart/form-data">
         <label for="montantRMB">Montant à recevoir sur Alipay (RMB)</label>
-        <input type="number" id="montantRMB" name="montantRMB" min="${CONFIG.MONTANT_MIN_RMB}" step="0.01" required oninput="majApercu()">
+        <input type="number" id="montantRMB" name="montantRMB" min="${CONFIG.MONTANT_MIN_RMB}" step="0.01" required oninput="majApercu()" value="${montantPrecedent}">
         <p class="souligne" id="apercuMontant" style="margin:6px 0 0;">Indiquez un montant pour voir le taux et le total.</p>
         <p id="astuceMontant" style="display:none; background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.3); color: #FBBF6B; border-radius: 8px; padding: 8px 12px; font-size: 12.5px; margin: 8px 0 0;"></p>
 
         <label for="alipayImage">Code QR de votre profil Alipay</label>
         <div class="avertissement">⚠️ Le compte Alipay doit être <b>vérifié</b>, sinon Alipay peut bloquer les fonds et ${CONFIG.NOM_SITE} ne pourra pas intervenir.</div>
         <div class="zone-fichier">
-          <input type="file" id="alipayImage" name="alipayImage" accept="image/*" required>
-          <p class="indice">Ouvrez Alipay → recevoir de l'argent → capture du QR code (max 2 Mo)</p>
+          ${imagePrecedente ? `<img src="${imagePrecedente.startsWith("http") ? imagePrecedente : "/uploads/alipay/" + imagePrecedente}" alt="QR déjà envoyé" style="max-width:150px; border-radius:8px; margin-bottom:8px; display:block;">` : ""}
+          <input type="file" id="alipayImage" name="alipayImage" accept="image/*" ${imagePrecedente ? "" : "required"}>
+          <p class="indice">${imagePrecedente ? "Image déjà envoyée ci-dessus. Laissez vide pour la conserver, ou choisissez-en une nouvelle." : "Ouvrez Alipay → recevoir de l'argent → capture du QR code (max 2 Mo)"}</p>
         </div>
+        <input type="hidden" name="alipayImagePrecedente" value="${imagePrecedente}">
         <button type="submit">Continuer</button>
       </form>
     </div>
@@ -1471,32 +1539,25 @@ app.get("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerV
           astuce.style.display = 'none';
         }
       }
+      if (${montantPrecedent ? "true" : "false"}) majApercu();
     </script>
     ${grilleTarifaireHTML()}
   `;
   res.send(page("Nouvelle recharge", contenu));
 });
-
-app.post("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerVerifie, uploadAlipay.single("alipayImage"), async (req, res) => {
-  const montant = parseFloat(req.body.montantRMB);
-  const image = req.file;
-  if (!image || !montant || montant < CONFIG.MONTANT_MIN_RMB) {
-    return res.status(400).send(page("Erreur", `<h1>Montant invalide</h1><p class="souligne">Le minimum est de ${CONFIG.MONTANT_MIN_RMB} RMB et une image est requise.</p><a href="/compte/nouvelle-demande">← Retour</a>`));
-  }
-  const { reference: referenceImage } = await traiterFichierUploade(image, "alipay");
-
+function pageMoyenPaiement(req, montant, referenceImage, moyenPrecedent = "", numeroPrecedent = "") {
   const estTogo = (req.utilisateur.telephone || "").trim().startsWith("+228");
   const optionsPaiement = Object.entries(CONFIG.PAIEMENT)
     .filter(([, info]) => estTogo || !info.togoUniquement)
     .map(([cle, info]) => `
-      <label class="moyen-option" data-cle="${cle}" data-type="${info.typeSaisie}" onclick="selectionnerMoyen(this)">
-        <input type="radio" name="moyenPaiement" value="${cle}" required>
+      <label class="moyen-option${cle === moyenPrecedent ? " selectionne" : ""}" data-cle="${cle}" data-type="${info.typeSaisie}" onclick="selectionnerMoyen(this)">
+        <input type="radio" name="moyenPaiement" value="${cle}" ${cle === moyenPrecedent ? "checked" : ""} required>
         ${info.logo ? `<img src="/logos/${info.logo}" alt="" style="width:50px; height:50px; object-fit:contain; border-radius:2px;">` : ""}
         <span>${info.nom}</span>
       </label>`)
     .join("");
 
-  const contenu = `
+  return `
     ${entete("accueil", req.utilisateur)}
     ${stepper(2, ETAPES)}
     <h1>Moyen de paiement</h1>
@@ -1508,12 +1569,12 @@ app.post("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exiger
         ${optionsPaiement}
 
         <label for="numeroExpediteur" id="labelNumeroExpediteur">Numéro ou compte utilisé pour le dépôt</label>
-        <input type="text" id="numeroExpediteur" name="numeroExpediteur" placeholder="Sélectionnez d'abord un moyen de paiement" required>
+        <input type="text" id="numeroExpediteur" name="numeroExpediteur" placeholder="Sélectionnez d'abord un moyen de paiement" value="${numeroPrecedent}" required>
         <div class="avertissement">⚠️ Important : le numéro Mobile Money, le compte bancaire ou le compte PI-SPI utilisé pour cette transaction doit être enregistré au <b>même nom</b> que votre profil ${CONFIG.NOM_SITE}. En cas de nom différent, l'opération peut échouer.</div>
 
         <button type="submit">Continuer</button>
       </form>
-      <a class="lien-discret" href="javascript:history.back()">← Précédent</a>
+      <a class="lien-discret" href="/compte/nouvelle-demande?montantRMB=${montant}&alipayImage=${encodeURIComponent(referenceImage)}">← Précédent</a>
     </div>
     <script>
       function selectionnerMoyen(labelClique) {
@@ -1543,9 +1604,35 @@ app.post("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exiger
           champ.oninput = function () { this.value = this.value.replace(/[0-9]/g, ''); };
         }
       }
+      ${moyenPrecedent ? `const optionActive = document.querySelector('.moyen-option[data-cle="${moyenPrecedent}"]'); if (optionActive) selectionnerMoyen(optionActive);` : ""}
     </script>
   `;
-  res.send(page("Moyen de paiement", contenu));
+}
+
+app.get("/compte/nouvelle-demande/paiement", exigerConnexion, exigerEmailVerifie, exigerVerifie, (req, res) => {
+  const montant = parseFloat(req.query.montantRMB);
+  const referenceImage = req.query.alipayImage;
+  if (!montant || !referenceImage) return res.redirect("/compte/nouvelle-demande");
+  res.send(page("Moyen de paiement", pageMoyenPaiement(req, montant, referenceImage, req.query.moyenPaiement || "", req.query.numeroExpediteur || "")));
+});
+app.post("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerVerifie, uploadAlipay.single("alipayImage"), async (req, res) => {
+  const montant = parseFloat(req.body.montantRMB);
+  const image = req.file;
+  const imagePrecedente = req.body.alipayImagePrecedente || "";
+  if (!montant || montant < CONFIG.MONTANT_MIN_RMB || (!image && !imagePrecedente)) {
+    return res.status(400).send(page("Erreur", `<h1>Montant invalide</h1><p class="souligne">Le minimum est de ${CONFIG.MONTANT_MIN_RMB} RMB et une image est requise.</p><a href="/compte/nouvelle-demande">← Retour</a>`));
+  }
+  let referenceImage = imagePrecedente;
+  if (image) {
+    try {
+      ({ reference: referenceImage } = await traiterFichierUploade(image, "alipay"));
+    } catch (erreur) {
+      console.error("Erreur upload QR Alipay :", erreur.message);
+      return res.status(500).send(page("Erreur", `<h1>Échec de l'envoi du fichier</h1><p class="souligne">Le service de stockage a rencontré un problème. Merci de réessayer dans un instant.</p><a href="/compte/nouvelle-demande">← Réessayer</a>`));
+    }
+  }
+
+  res.send(page("Moyen de paiement", pageMoyenPaiement(req, montant, referenceImage)));
 });
 
 // Étape 3 : simple récapitulatif — RIEN n'est encore enregistré. Le clic sur
@@ -1603,7 +1690,7 @@ app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exiger
         </label>
         <button type="submit" class="jaune">J'ai payé</button>
       </form>
-      <a class="lien-discret" href="javascript:history.back()">← Précédent</a>
+      <a class="lien-discret" href="/compte/nouvelle-demande/paiement?montantRMB=${montant}&alipayImage=${encodeURIComponent(alipayImage)}&moyenPaiement=${encodeURIComponent(moyenPaiement)}&numeroExpediteur=${encodeURIComponent(numeroExpediteur)}">← Précédent</a>
     </div>
   `;
   res.send(page("Confirmation", contenu));
@@ -1761,7 +1848,13 @@ app.post("/compte/transactions/:reference/preuve-paiement", exigerConnexion, exi
   if (!t || t.statut !== "en_attente_paiement") return res.status(404).send(page("Introuvable", `<h1>Transaction introuvable</h1><a href="/compte">← Retour</a>`));
   if (!req.file) return res.status(400).send(page("Erreur", `<h1>Merci de joindre une preuve de paiement</h1><a href="/compte/transactions/${t.reference}/preuve">← Retour</a>`));
 
-  const { reference: referencePreuve, estPdf } = await traiterFichierUploade(req.file, "preuves");
+  let referencePreuve, estPdf;
+  try {
+    ({ reference: referencePreuve, estPdf } = await traiterFichierUploade(req.file, "preuves"));
+  } catch (erreur) {
+    console.error("Erreur upload preuve de paiement :", erreur.message);
+    return res.status(500).send(page("Erreur", `<h1>Échec de l'envoi du fichier</h1><p class="souligne">Le service de stockage a rencontré un problème. Merci de réessayer dans un instant.</p><a href="/compte/transactions/${t.reference}/preuve">← Réessayer</a>`));
+  }
   t.imagePaiement = referencePreuve;
   t.imagePaiementEstPdf = estPdf;
   t.statut = "preuve_recue";
@@ -1769,6 +1862,11 @@ app.post("/compte/transactions/:reference/preuve-paiement", exigerConnexion, exi
   // La fiche interne n'est créée qu'après confirmation par l'admin (pas ici).
   sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
   ajouterNotification(t.utilisateurId, `Preuve de paiement reçue pour votre recharge de ${t.montantRMB} RMB. En attente de confirmation.`, t.reference);
+  envoyerNotificationPush(
+    "Nouvelle preuve de paiement",
+    `${t.nomUtilisateur} — ${t.montantRMB} RMB (réf. ${t.reference})`,
+    "/admin/transactions"
+  ).catch(() => {});
   // ➕ AJOUT : Envoi de l'e-mail de confirmation de réception
   envoyerEmailTransaction(
     t.identifiantUtilisateur,
@@ -2004,8 +2102,71 @@ app.get("/admin", exigerAdmin, (req, res) => {
       <a href="/admin/transactions">Transactions (${enAttenteConfirmation} à confirmer, ${enAttenteCredit} à créditer)</a>
       <a href="/admin/deconnexion">Déconnexion</a>
     </div>
+    ${PUSH_ACTIF ? `
+    <div class="carte">
+      <h2>🔔 Notifications</h2>
+      <p class="souligne" id="statutPush">Vérification en cours...</p>
+      <button id="btnActiverPush" class="jaune" style="display:none;">Activer les notifications sur cet appareil</button>
+    </div>
+    <script>
+      const VAPID_PUBLIC_KEY = "${process.env.VAPID_PUBLIC_KEY}";
+      function urlBase64ToUint8Array(base64String) {
+        const padding = '='.repeat((4 - base64String.length % 4) % 4);
+        const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+        const rawData = window.atob(base64);
+        return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
+      }
+      async function initPush() {
+        const statutEl = document.getElementById('statutPush');
+        const btn = document.getElementById('btnActiverPush');
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+          statutEl.textContent = "Les notifications ne sont pas supportées par ce navigateur.";
+          return;
+        }
+        const registration = await navigator.serviceWorker.ready;
+        const abonnementExistant = await registration.pushManager.getSubscription();
+        if (abonnementExistant) {
+          statutEl.textContent = "✅ Notifications activées sur cet appareil.";
+          return;
+        }
+        statutEl.textContent = "Recevez une alerte dès qu'un compte est à vérifier ou qu'une preuve de paiement arrive.";
+        btn.style.display = 'block';
+        btn.addEventListener('click', async () => {
+          try {
+            const permission = await Notification.requestPermission();
+            if (permission !== 'granted') { statutEl.textContent = "Permission refusée."; return; }
+            const abonnement = await registration.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+            });
+            await fetch('/admin/notifications-push/abonner', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(abonnement),
+            });
+            statutEl.textContent = "✅ Notifications activées sur cet appareil.";
+            btn.style.display = 'none';
+          } catch (e) {
+            statutEl.textContent = "Erreur : " + e.message;
+          }
+        });
+      }
+      initPush();
+    </script>
+    ` : ""}
   `;
   res.send(page("Admin", contenu, { large: true, admin: true }));
+});
+
+app.post("/admin/notifications-push/abonner", exigerAdmin, (req, res) => {
+  const abonnement = req.body;
+  if (!abonnement || !abonnement.endpoint) return res.status(400).json({ ok: false });
+  const dejaPresent = abonnementsPush.some((a) => a.endpoint === abonnement.endpoint);
+  if (!dejaPresent) {
+    abonnementsPush.push(abonnement);
+    sauvegarderJSON(FICHIER_ABONNEMENTS_PUSH, abonnementsPush);
+  }
+  res.json({ ok: true });
 });
 
 app.get("/admin/utilisateurs", exigerAdmin, (req, res) => {
@@ -2395,6 +2556,7 @@ async function demarrerServeur() {
   utilisateurs = await chargerJSON(FICHIER_UTILISATEURS);
   transactions = await chargerJSON(FICHIER_TRANSACTIONS);
   notifications = await chargerJSON(FICHIER_NOTIFICATIONS);
+  abonnementsPush = await chargerJSON(FICHIER_ABONNEMENTS_PUSH);
 
   // 3. Démarrage du serveur HTTP une fois les données prêtes.
   app.listen(CONFIG.PORT, () => {
