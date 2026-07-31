@@ -1866,7 +1866,7 @@ app.post("/compte/transactions/:reference/preuve-paiement", exigerConnexion, exi
     "Nouvelle preuve de paiement",
     `${t.nomUtilisateur} — ${t.montantRMB} RMB (réf. ${t.reference})`,
     "/admin/transactions"
-  ).catch(() => {});
+  ).catch((e) => console.error("Erreur envoi push :", e.message));
   // ➕ AJOUT : Envoi de l'e-mail de confirmation de réception
   envoyerEmailTransaction(
     t.identifiantUtilisateur,
@@ -2123,9 +2123,14 @@ app.get("/admin", exigerAdmin, (req, res) => {
           statutEl.textContent = "Les notifications ne sont pas supportées par ce navigateur.";
           return;
         }
-        const registration = await navigator.serviceWorker.ready;
+       const registration = await navigator.serviceWorker.ready;
         const abonnementExistant = await registration.pushManager.getSubscription();
         if (abonnementExistant) {
+          await fetch('/admin/notifications-push/abonner', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(abonnementExistant),
+          }).catch(() => {});
           statutEl.textContent = "✅ Notifications activées sur cet appareil.";
           return;
         }
@@ -2161,11 +2166,9 @@ app.get("/admin", exigerAdmin, (req, res) => {
 app.post("/admin/notifications-push/abonner", exigerAdmin, (req, res) => {
   const abonnement = req.body;
   if (!abonnement || !abonnement.endpoint) return res.status(400).json({ ok: false });
-  const dejaPresent = abonnementsPush.some((a) => a.endpoint === abonnement.endpoint);
-  if (!dejaPresent) {
-    abonnementsPush.push(abonnement);
-    sauvegarderJSON(FICHIER_ABONNEMENTS_PUSH, abonnementsPush);
-  }
+  abonnementsPush = abonnementsPush.filter((a) => a.endpoint !== abonnement.endpoint);
+  abonnementsPush.push(abonnement);
+  sauvegarderJSON(FICHIER_ABONNEMENTS_PUSH, abonnementsPush);
   res.json({ ok: true });
 });
 
@@ -2277,6 +2280,8 @@ app.get("/admin/transactions", exigerAdmin, (req, res) => {
     );
   }
 
+  const totalRMB = listeFiltree.reduce((s, t) => s + t.montantRMB, 0);
+  const totalXOF = listeFiltree.reduce((s, t) => s + t.total, 0);
   const lignes = listeFiltree.reverse().map((t) => {
     const lienAlipay = hrefFichier(t.alipayImage, "uploads/alipay");
     const imgAlipay = t.alipayImage ? `<a href="${lienAlipay}" target="_blank"><img class="miniature" src="${lienAlipay}"></a>` : "—";
@@ -2314,6 +2319,7 @@ app.get("/admin/transactions", exigerAdmin, (req, res) => {
       ${filtreLien("annule", "Annulées")}
     </div>
     ${listeFiltree.length === 0 ? `<p class="aucune-donnee">Aucune transaction.</p>` : `<table class="admin"><thead><tr><th>QR Alipay</th><th>Réf</th><th>Client</th><th>Total</th><th>RMB</th><th>N° dépôt</th><th>Preuve</th><th>Heure</th><th>Moyen</th><th>Statut</th><th>Fiche</th><th>Action</th></tr></thead><tbody>${lignes}</tbody></table>`}
+    <p class="souligne" style="margin-top:10px;"><b>Total :</b> ${totalRMB.toLocaleString("fr-FR")} RMB — ${totalXOF.toLocaleString("fr-FR")} XOF</p>
     <p class="souligne" style="margin-top:16px;">Export : <a href="/admin/transactions.json">/admin/transactions.json</a></p>
   `;
   res.send(page("Transactions", contenu, { large: true, admin: true }));
