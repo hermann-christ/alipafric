@@ -150,6 +150,8 @@ const FICHIER_UTILISATEURS = path.join(__dirname, "utilisateurs.json");
 const FICHIER_TRANSACTIONS = path.join(__dirname, "transactions.json");
 const FICHIER_NOTIFICATIONS = path.join(__dirname, "notifications.json");
 const FICHIER_ABONNEMENTS_PUSH = path.join(__dirname, "abonnements-push.json");
+const FICHIER_SESSIONS = path.join(__dirname, "sessions.json");
+const FICHIER_SESSIONS_ADMIN = path.join(__dirname, "sessions-admin.json");
 
 // Association "chemin de fichier local" -> "nom de collection MongoDB".
 // On garde les mêmes noms de constantes (FICHIER_UTILISATEURS, etc.) dans
@@ -160,6 +162,8 @@ const NOM_COLLECTION = {
   [FICHIER_TRANSACTIONS]: "transactions",
   [FICHIER_NOTIFICATIONS]: "notifications",
   [FICHIER_ABONNEMENTS_PUSH]: "abonnementsPush",
+  [FICHIER_SESSIONS]: "sessions",
+  [FICHIER_SESSIONS_ADMIN]: "sessionsAdmin",
 };
 
 // ----------------------------------------------------------------------------
@@ -357,8 +361,15 @@ function motDePasseRobuste(mdp) {
   return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/.test(mdp);
 }
 
-const sessions = new Map(); // sessionId -> idUtilisateur
-const sessionsAdmin = new Set(); // sessionId admin
+const sessions = new Map(); // sessionId -> { idUtilisateur, expiration, derniereSync }
+const sessionsAdmin = new Map(); // sessionId -> { expiration, derniereSync }
+
+function sauvegarderSessions() {
+  sauvegarderJSON(FICHIER_SESSIONS, Array.from(sessions, ([sessionId, s]) => ({ sessionId, idUtilisateur: s.idUtilisateur, expiration: s.expiration })));
+}
+function sauvegarderSessionsAdmin() {
+  sauvegarderJSON(FICHIER_SESSIONS_ADMIN, Array.from(sessionsAdmin, ([sessionId, s]) => ({ sessionId, expiration: s.expiration })));
+}
 
 function parseCookies(req) {
   const entete = req.headers.cookie;
@@ -373,22 +384,24 @@ function parseCookies(req) {
 }
 function connecterUtilisateur(res, idUtilisateur) {
   const sessionId = crypto.randomUUID();
-  sessions.set(sessionId, idUtilisateur);
-  res.setHeader("Set-Cookie", `session=${sessionId}; HttpOnly; Path=/; SameSite=Lax`);
+  sessions.set(sessionId, { idUtilisateur, expiration: Date.now() + 3600 * 1000, derniereSync: Date.now() });
+  sauvegarderSessions();
+  res.setHeader("Set-Cookie", `session=${sessionId}; HttpOnly; Path=/; SameSite=Lax; Max-Age=3600`);
 }
 function deconnecterUtilisateur(req, res) {
   const cookies = parseCookies(req);
-  if (cookies.session) sessions.delete(cookies.session);
+  if (cookies.session) { sessions.delete(cookies.session); sauvegarderSessions(); }
   res.setHeader("Set-Cookie", "session=; HttpOnly; Path=/; Max-Age=0");
 }
 function connecterAdmin(res) {
   const sessionId = crypto.randomUUID();
-  sessionsAdmin.add(sessionId);
-  res.setHeader("Set-Cookie", `sessionAdmin=${sessionId}; HttpOnly; Path=/; SameSite=Lax`);
+  sessionsAdmin.set(sessionId, { expiration: Date.now() + 604800 * 1000, derniereSync: Date.now() });
+  sauvegarderSessionsAdmin();
+  res.setHeader("Set-Cookie", `sessionAdmin=${sessionId}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
 }
 function deconnecterAdmin(req, res) {
   const cookies = parseCookies(req);
-  if (cookies.sessionAdmin) sessionsAdmin.delete(cookies.sessionAdmin);
+  if (cookies.sessionAdmin) { sessionsAdmin.delete(cookies.sessionAdmin); sauvegarderSessionsAdmin(); }
   res.setHeader("Set-Cookie", "sessionAdmin=; HttpOnly; Path=/; Max-Age=0");
 }
 
@@ -404,9 +417,29 @@ app.use("/logos", express.static(DOSSIER_LOGOS));
 
 app.use((req, res, next) => {
   const cookies = parseCookies(req);
-  const idUtilisateur = sessions.get(cookies.session);
-  req.utilisateur = idUtilisateur ? utilisateurs.find((u) => u.id === idUtilisateur) : null;
-  req.estAdmin = sessionsAdmin.has(cookies.sessionAdmin);
+
+  const s = sessions.get(cookies.session);
+  if (s && s.expiration > Date.now()) {
+    req.utilisateur = utilisateurs.find((u) => u.id === s.idUtilisateur) || null;
+    s.expiration = Date.now() + 3600 * 1000;
+    res.setHeader("Set-Cookie", `session=${cookies.session}; HttpOnly; Path=/; SameSite=Lax; Max-Age=3600`);
+    if (Date.now() - s.derniereSync > 5 * 60 * 1000) { s.derniereSync = Date.now(); sauvegarderSessions(); }
+  } else {
+    if (s) { sessions.delete(cookies.session); sauvegarderSessions(); }
+    req.utilisateur = null;
+  }
+
+  const sa = sessionsAdmin.get(cookies.sessionAdmin);
+  if (sa && sa.expiration > Date.now()) {
+    req.estAdmin = true;
+    sa.expiration = Date.now() + 604800 * 1000;
+    res.setHeader("Set-Cookie", `sessionAdmin=${cookies.sessionAdmin}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
+    if (Date.now() - sa.derniereSync > 30 * 60 * 1000) { sa.derniereSync = Date.now(); sauvegarderSessionsAdmin(); }
+  } else {
+    if (sa) { sessionsAdmin.delete(cookies.sessionAdmin); sauvegarderSessionsAdmin(); }
+    req.estAdmin = false;
+  }
+
   next();
 });
 
@@ -1866,7 +1899,7 @@ app.post("/compte/transactions/:reference/preuve-paiement", exigerConnexion, exi
     "Nouvelle preuve de paiement",
     `${t.nomUtilisateur} — ${t.montantRMB} RMB (réf. ${t.reference})`,
     "/admin/transactions"
-  ).catch((e) => console.error("Erreur envoi push :", e.message));
+  ).catch((e) => console.error("Push preuve paiement :", e.message))
   // ➕ AJOUT : Envoi de l'e-mail de confirmation de réception
   envoyerEmailTransaction(
     t.identifiantUtilisateur,
@@ -2123,14 +2156,9 @@ app.get("/admin", exigerAdmin, (req, res) => {
           statutEl.textContent = "Les notifications ne sont pas supportées par ce navigateur.";
           return;
         }
-       const registration = await navigator.serviceWorker.ready;
+        const registration = await navigator.serviceWorker.ready;
         const abonnementExistant = await registration.pushManager.getSubscription();
         if (abonnementExistant) {
-          await fetch('/admin/notifications-push/abonner', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(abonnementExistant),
-          }).catch(() => {});
           statutEl.textContent = "✅ Notifications activées sur cet appareil.";
           return;
         }
@@ -2166,9 +2194,11 @@ app.get("/admin", exigerAdmin, (req, res) => {
 app.post("/admin/notifications-push/abonner", exigerAdmin, (req, res) => {
   const abonnement = req.body;
   if (!abonnement || !abonnement.endpoint) return res.status(400).json({ ok: false });
-  abonnementsPush = abonnementsPush.filter((a) => a.endpoint !== abonnement.endpoint);
-  abonnementsPush.push(abonnement);
-  sauvegarderJSON(FICHIER_ABONNEMENTS_PUSH, abonnementsPush);
+  const dejaPresent = abonnementsPush.some((a) => a.endpoint === abonnement.endpoint);
+  if (!dejaPresent) {
+    abonnementsPush.push(abonnement);
+    sauvegarderJSON(FICHIER_ABONNEMENTS_PUSH, abonnementsPush);
+  }
   res.json({ ok: true });
 });
 
@@ -2280,8 +2310,6 @@ app.get("/admin/transactions", exigerAdmin, (req, res) => {
     );
   }
 
-  const totalRMB = listeFiltree.reduce((s, t) => s + t.montantRMB, 0);
-  const totalXOF = listeFiltree.reduce((s, t) => s + t.total, 0);
   const lignes = listeFiltree.reverse().map((t) => {
     const lienAlipay = hrefFichier(t.alipayImage, "uploads/alipay");
     const imgAlipay = t.alipayImage ? `<a href="${lienAlipay}" target="_blank"><img class="miniature" src="${lienAlipay}"></a>` : "—";
@@ -2319,7 +2347,6 @@ app.get("/admin/transactions", exigerAdmin, (req, res) => {
       ${filtreLien("annule", "Annulées")}
     </div>
     ${listeFiltree.length === 0 ? `<p class="aucune-donnee">Aucune transaction.</p>` : `<table class="admin"><thead><tr><th>QR Alipay</th><th>Réf</th><th>Client</th><th>Total</th><th>RMB</th><th>N° dépôt</th><th>Preuve</th><th>Heure</th><th>Moyen</th><th>Statut</th><th>Fiche</th><th>Action</th></tr></thead><tbody>${lignes}</tbody></table>`}
-    <p class="souligne" style="margin-top:10px;"><b>Total :</b> ${totalRMB.toLocaleString("fr-FR")} RMB — ${totalXOF.toLocaleString("fr-FR")} XOF</p>
     <p class="souligne" style="margin-top:16px;">Export : <a href="/admin/transactions.json">/admin/transactions.json</a></p>
   `;
   res.send(page("Transactions", contenu, { large: true, admin: true }));
@@ -2563,6 +2590,10 @@ async function demarrerServeur() {
   transactions = await chargerJSON(FICHIER_TRANSACTIONS);
   notifications = await chargerJSON(FICHIER_NOTIFICATIONS);
   abonnementsPush = await chargerJSON(FICHIER_ABONNEMENTS_PUSH);
+  const sessionsSauvegardees = await chargerJSON(FICHIER_SESSIONS);
+  for (const s of sessionsSauvegardees) if (s.expiration > Date.now()) sessions.set(s.sessionId, { idUtilisateur: s.idUtilisateur, expiration: s.expiration, derniereSync: Date.now() });
+  const sessionsAdminSauvegardees = await chargerJSON(FICHIER_SESSIONS_ADMIN);
+  for (const s of sessionsAdminSauvegardees) if (s.expiration > Date.now()) sessionsAdmin.set(s.sessionId, { expiration: s.expiration, derniereSync: Date.now() });
 
   // 3. Démarrage du serveur HTTP une fois les données prêtes.
   app.listen(CONFIG.PORT, () => {
