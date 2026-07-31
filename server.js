@@ -152,6 +152,7 @@ const FICHIER_NOTIFICATIONS = path.join(__dirname, "notifications.json");
 const FICHIER_ABONNEMENTS_PUSH = path.join(__dirname, "abonnements-push.json");
 const FICHIER_SESSIONS = path.join(__dirname, "sessions.json");
 const FICHIER_SESSIONS_ADMIN = path.join(__dirname, "sessions-admin.json");
+const FICHIER_ABONNEMENTS_PUSH_CLIENTS = path.join(__dirname, "abonnements-push-clients.json");
 
 // Association "chemin de fichier local" -> "nom de collection MongoDB".
 // On garde les mêmes noms de constantes (FICHIER_UTILISATEURS, etc.) dans
@@ -164,6 +165,7 @@ const NOM_COLLECTION = {
   [FICHIER_ABONNEMENTS_PUSH]: "abonnementsPush",
   [FICHIER_SESSIONS]: "sessions",
   [FICHIER_SESSIONS_ADMIN]: "sessionsAdmin",
+  [FICHIER_ABONNEMENTS_PUSH_CLIENTS]: "abonnementsPushClients",
 };
 
 // ----------------------------------------------------------------------------
@@ -212,6 +214,7 @@ if (PUSH_ACTIF) {
   console.warn("⚠️  VAPID non configuré : pas de notifications push. Voir .env.");
 }
 let abonnementsPush = [];
+let abonnementsPushClients = []; // [{ utilisateurId, endpoint, keys, ... }]
 
 async function envoyerNotificationPush(titre, corps, url) {
   if (!PUSH_ACTIF || abonnementsPush.length === 0) return;
@@ -233,6 +236,29 @@ async function envoyerNotificationPush(titre, corps, url) {
     abonnementsPush = abonnementsValides;
     sauvegarderJSON(FICHIER_ABONNEMENTS_PUSH, abonnementsPush);
   }
+}
+
+// Notification push ciblée sur un seul client (pas tous les admins). Si le
+// client s'est déconnecté, son abonnement a été retiré à la déconnexion :
+// il ne recevra donc plus rien tant qu'il ne se reconnecte pas.
+async function envoyerNotificationPushClient(utilisateurId, titre, corps, url) {
+  const abonnementsCibles = abonnementsPushClients.filter((a) => a.utilisateurId === utilisateurId);
+  if (!PUSH_ACTIF || abonnementsCibles.length === 0) return;
+  const charge = JSON.stringify({ titre, corps, url: url || "/compte" });
+  let modifie = false;
+  for (const abonnement of abonnementsCibles) {
+    try {
+      await webpush.sendNotification(abonnement, charge);
+    } catch (erreur) {
+      if (erreur.statusCode === 410 || erreur.statusCode === 404) {
+        abonnementsPushClients = abonnementsPushClients.filter((a) => a.endpoint !== abonnement.endpoint);
+        modifie = true;
+      } else {
+        console.error("Erreur envoi notification push client :", erreur.message);
+      }
+    }
+  }
+  if (modifie) sauvegarderJSON(FICHIER_ABONNEMENTS_PUSH_CLIENTS, abonnementsPushClients);
 }
 
 async function connecterMongo() {
@@ -390,7 +416,16 @@ function connecterUtilisateur(res, idUtilisateur) {
 }
 function deconnecterUtilisateur(req, res) {
   const cookies = parseCookies(req);
-  if (cookies.session) { sessions.delete(cookies.session); sauvegarderSessions(); }
+  if (cookies.session) {
+    const s = sessions.get(cookies.session);
+    sessions.delete(cookies.session);
+    sauvegarderSessions();
+    if (s) {
+      const avait = abonnementsPushClients.length;
+      abonnementsPushClients = abonnementsPushClients.filter((a) => a.utilisateurId !== s.idUtilisateur);
+      if (abonnementsPushClients.length !== avait) sauvegarderJSON(FICHIER_ABONNEMENTS_PUSH_CLIENTS, abonnementsPushClients);
+    }
+  }
   res.setHeader("Set-Cookie", "session=; HttpOnly; Path=/; Max-Age=0");
 }
 function connecterAdmin(res) {
@@ -1409,7 +1444,55 @@ app.get("/compte/profil", exigerConnexion, exigerEmailVerifie, (req, res) => {
         ${caseAfficherMdp(["nouveauMdp", "confirmerMdp"])}
         <button type="submit" class="fantome">Mettre à jour le mot de passe</button>
       </form>
+      ${PUSH_ACTIF ? `<p class="souligne" id="statutPushClient" style="margin-top:12px;"></p>
+      <a href="#" id="lienActiverPushClient" class="lien-discret" style="display:none;">🔔 Activer les notifications</a>` : ""}
     </div>
+    ${PUSH_ACTIF ? `
+    <script>
+      function urlBase64ToUint8ArrayClient(base64String) {
+        const padding = '='.repeat((4 - base64String.length % 4) % 4);
+        const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+        const rawData = window.atob(base64);
+        return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
+      }
+      async function initPushClient() {
+        const statutEl = document.getElementById('statutPushClient');
+        const lien = document.getElementById('lienActiverPushClient');
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+        const registration = await navigator.serviceWorker.ready;
+        const abonnementExistant = await registration.pushManager.getSubscription();
+        if (abonnementExistant) {
+          await fetch('/compte/notifications-push/abonner', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(abonnementExistant),
+          }).catch(() => {});
+          statutEl.textContent = "🔔 Notifications activées sur cet appareil.";
+          return;
+        }
+        lien.style.display = 'inline';
+        lien.addEventListener('click', async (e) => {
+          e.preventDefault();
+          try {
+            const permission = await Notification.requestPermission();
+            if (permission !== 'granted') return;
+            const abonnement = await registration.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey: urlBase64ToUint8ArrayClient("${process.env.VAPID_PUBLIC_KEY}"),
+            });
+            await fetch('/compte/notifications-push/abonner', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(abonnement),
+            });
+            statutEl.textContent = "🔔 Notifications activées sur cet appareil.";
+            lien.style.display = 'none';
+          } catch (e) {}
+        });
+      }
+      initPushClient();
+    </script>
+    ` : ""}
     <div class="carte" style="border-color: var(--rouge);">
       <h2 style="color:var(--rouge);">Zone de danger</h2>
       <p class="souligne">La suppression de votre compte est définitive et irréversible.</p>
@@ -1895,6 +1978,7 @@ app.post("/compte/transactions/:reference/preuve-paiement", exigerConnexion, exi
   // La fiche interne n'est créée qu'après confirmation par l'admin (pas ici).
   sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
   ajouterNotification(t.utilisateurId, `Preuve de paiement reçue pour votre recharge de ${t.montantRMB} RMB. En attente de confirmation.`, t.reference);
+  envoyerNotificationPushClient(t.utilisateurId, "Preuve reçue", `Votre preuve de paiement pour la recharge de ${t.montantRMB} RMB a bien été reçue.`, `/compte/transactions/${t.reference}`).catch(() => {});
   envoyerNotificationPush(
     "Nouvelle preuve de paiement",
     `${t.nomUtilisateur} — ${t.montantRMB} RMB (réf. ${t.reference})`,
@@ -2159,6 +2243,11 @@ app.get("/admin", exigerAdmin, (req, res) => {
         const registration = await navigator.serviceWorker.ready;
         const abonnementExistant = await registration.pushManager.getSubscription();
         if (abonnementExistant) {
+          await fetch('/admin/notifications-push/abonner', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(abonnementExistant),
+          }).catch(() => {});
           statutEl.textContent = "✅ Notifications activées sur cet appareil.";
           return;
         }
@@ -2199,6 +2288,15 @@ app.post("/admin/notifications-push/abonner", exigerAdmin, (req, res) => {
     abonnementsPush.push(abonnement);
     sauvegarderJSON(FICHIER_ABONNEMENTS_PUSH, abonnementsPush);
   }
+  res.json({ ok: true });
+});
+
+app.post("/compte/notifications-push/abonner", exigerConnexion, exigerEmailVerifie, (req, res) => {
+  const abonnement = req.body;
+  if (!abonnement || !abonnement.endpoint) return res.status(400).json({ ok: false });
+  abonnementsPushClients = abonnementsPushClients.filter((a) => a.endpoint !== abonnement.endpoint);
+  abonnementsPushClients.push({ ...abonnement, utilisateurId: req.utilisateur.id });
+  sauvegarderJSON(FICHIER_ABONNEMENTS_PUSH_CLIENTS, abonnementsPushClients);
   res.json({ ok: true });
 });
 
@@ -2310,6 +2408,8 @@ app.get("/admin/transactions", exigerAdmin, (req, res) => {
     );
   }
 
+  const totalRMB = listeFiltree.reduce((s, t) => s + t.montantRMB, 0);
+  const totalXOF = listeFiltree.reduce((s, t) => s + t.total, 0);
   const lignes = listeFiltree.reverse().map((t) => {
     const lienAlipay = hrefFichier(t.alipayImage, "uploads/alipay");
     const imgAlipay = t.alipayImage ? `<a href="${lienAlipay}" target="_blank"><img class="miniature" src="${lienAlipay}"></a>` : "—";
@@ -2347,6 +2447,7 @@ app.get("/admin/transactions", exigerAdmin, (req, res) => {
       ${filtreLien("annule", "Annulées")}
     </div>
     ${listeFiltree.length === 0 ? `<p class="aucune-donnee">Aucune transaction.</p>` : `<table class="admin"><thead><tr><th>QR Alipay</th><th>Réf</th><th>Client</th><th>Total</th><th>RMB</th><th>N° dépôt</th><th>Preuve</th><th>Heure</th><th>Moyen</th><th>Statut</th><th>Fiche</th><th>Action</th></tr></thead><tbody>${lignes}</tbody></table>`}
+    <p class="souligne" style="margin-top:10px;"><b>Total :</b> ${totalRMB.toLocaleString("fr-FR")} RMB — ${totalXOF.toLocaleString("fr-FR")} XOF</p>
     <p class="souligne" style="margin-top:16px;">Export : <a href="/admin/transactions.json">/admin/transactions.json</a></p>
   `;
   res.send(page("Transactions", contenu, { large: true, admin: true }));
@@ -2391,6 +2492,7 @@ app.post("/admin/transactions/:reference/confirmer-paiement", exigerAdmin, async
     } catch (e) {}
     sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
     ajouterNotification(t.utilisateurId, `Votre paiement de ${t.total.toLocaleString("fr-FR")} F CFA a été confirmé. Créditation Alipay en cours.`, t.reference);
+    envoyerNotificationPushClient(t.utilisateurId, "Paiement confirmé", `Votre paiement de ${t.total.toLocaleString("fr-FR")} F CFA a été confirmé. Créditation Alipay en cours.`, `/compte/transactions/${t.reference}`).catch(() => {});
   }
   res.redirect("/admin/transactions");
 });
@@ -2402,6 +2504,7 @@ app.post("/admin/transactions/:reference/annuler-paiement", exigerAdmin, (req, r
     t.dateAnnulation = new Date().toISOString();
     sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
     ajouterNotification(t.utilisateurId, `Votre paiement pour la référence ${t.reference} a été annulé. Contactez le support pour plus d'informations.`, t.reference);
+    envoyerNotificationPushClient(t.utilisateurId, "Paiement annulé", `Votre paiement pour la référence ${t.reference} a été annulé. Contactez le support.`, `/compte/transactions/${t.reference}`).catch(() => {});
   }
   res.redirect("/admin/transactions");
 });
@@ -2420,6 +2523,7 @@ app.post("/admin/transactions/:reference/confirmer-recharge", exigerAdmin, async
     } catch (e) { console.error("Erreur génération reçu client :", e.message); }
     sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
     ajouterNotification(t.utilisateurId, `Votre compte Alipay a été crédité de ${t.montantRMB} RMB ✔ Transaction terminée.`, t.reference);
+    envoyerNotificationPushClient(t.utilisateurId, "Recharge terminée", `Votre compte Alipay a été crédité de ${t.montantRMB} RMB ✔`, `/compte/transactions/${t.reference}`).catch(() => {});
   }
   // ➕ AJOUT : E-mail de confirmation de recharge Alipay terminée
     envoyerEmailTransaction(
@@ -2590,6 +2694,7 @@ async function demarrerServeur() {
   transactions = await chargerJSON(FICHIER_TRANSACTIONS);
   notifications = await chargerJSON(FICHIER_NOTIFICATIONS);
   abonnementsPush = await chargerJSON(FICHIER_ABONNEMENTS_PUSH);
+  abonnementsPushClients = await chargerJSON(FICHIER_ABONNEMENTS_PUSH_CLIENTS);
   const sessionsSauvegardees = await chargerJSON(FICHIER_SESSIONS);
   for (const s of sessionsSauvegardees) if (s.expiration > Date.now()) sessions.set(s.sessionId, { idUtilisateur: s.idUtilisateur, expiration: s.expiration, derniereSync: Date.now() });
   const sessionsAdminSauvegardees = await chargerJSON(FICHIER_SESSIONS_ADMIN);
