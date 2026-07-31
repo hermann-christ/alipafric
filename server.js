@@ -412,7 +412,7 @@ function connecterUtilisateur(res, idUtilisateur) {
   const sessionId = crypto.randomUUID();
   sessions.set(sessionId, { idUtilisateur, expiration: Date.now() + 3600 * 1000, derniereSync: Date.now() });
   sauvegarderSessions();
-  res.setHeader("Set-Cookie", `session=${sessionId}; HttpOnly; Path=/; SameSite=Lax; Max-Age=3600`);
+  res.setHeader("Set-Cookie", `session=${sessionId}; HttpOnly; Path=/; SameSite=Lax; Max-Age=14400`);
 }
 function deconnecterUtilisateur(req, res) {
   const cookies = parseCookies(req);
