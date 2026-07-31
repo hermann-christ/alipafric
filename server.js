@@ -412,7 +412,7 @@ function connecterUtilisateur(res, idUtilisateur) {
   const sessionId = crypto.randomUUID();
   sessions.set(sessionId, { idUtilisateur, expiration: Date.now() + 3600 * 1000, derniereSync: Date.now() });
   sauvegarderSessions();
-  res.setHeader("Set-Cookie", `session=${sessionId}; HttpOnly; Path=/; SameSite=Lax; Max-Age=14400`);
+  res.setHeader("Set-Cookie", `session=${sessionId}; HttpOnly; Path=/; SameSite=Lax; Max-Age=3600`);
 }
 function deconnecterUtilisateur(req, res) {
   const cookies = parseCookies(req);
@@ -1341,9 +1341,50 @@ app.get("/compte", exigerConnexion, exigerEmailVerifie, (req, res) => {
 
   const contenu = `
     ${entete("accueil", u)}
-    <h1>Salut, ${nomAffichage(u)}</h1>
+    <h1>Salut, ${nomAffichage(u)} <span id="iconePushClient" style="font-size:16px; vertical-align:middle; display:none; cursor:default;" title="Notifications activées">🔔</span></h1>
     <p class="souligne">Ravi de vous revoir sur ${CONFIG.NOM_SITE}.</p>
     ${banniere}
+    ${PUSH_ACTIF ? `
+    <script>
+      function urlBase64ToUint8ArrayClient(base64String) {
+        const padding = '='.repeat((4 - base64String.length % 4) % 4);
+        const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+        const rawData = window.atob(base64);
+        return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
+      }
+      async function initPushClientAuto() {
+        const icone = document.getElementById('iconePushClient');
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+        const registration = await navigator.serviceWorker.ready;
+        let abonnement = await registration.pushManager.getSubscription();
+        if (abonnement) {
+          fetch('/compte/notifications-push/abonner', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(abonnement),
+          }).catch(() => {});
+          icone.style.display = 'inline';
+          return;
+        }
+        try {
+          if (Notification.permission === 'denied') return;
+          const permission = await Notification.requestPermission();
+          if (permission !== 'granted') return;
+          abonnement = await registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8ArrayClient("${process.env.VAPID_PUBLIC_KEY}"),
+          });
+          await fetch('/compte/notifications-push/abonner', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(abonnement),
+          });
+          icone.style.display = 'inline';
+        } catch (e) {}
+      }
+      initPushClientAuto();
+    </script>
+    ` : ""}
     <div class="taux-boite">
       <span>Le Yuan à partir de</span>
       <b>93 F CFA</b>
@@ -1444,55 +1485,7 @@ app.get("/compte/profil", exigerConnexion, exigerEmailVerifie, (req, res) => {
         ${caseAfficherMdp(["nouveauMdp", "confirmerMdp"])}
         <button type="submit" class="fantome">Mettre à jour le mot de passe</button>
       </form>
-      ${PUSH_ACTIF ? `<p class="souligne" id="statutPushClient" style="margin-top:12px;"></p>
-      <a href="#" id="lienActiverPushClient" class="lien-discret" style="display:none;">🔔 Activer les notifications</a>` : ""}
     </div>
-    ${PUSH_ACTIF ? `
-    <script>
-      function urlBase64ToUint8ArrayClient(base64String) {
-        const padding = '='.repeat((4 - base64String.length % 4) % 4);
-        const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-        const rawData = window.atob(base64);
-        return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
-      }
-      async function initPushClient() {
-        const statutEl = document.getElementById('statutPushClient');
-        const lien = document.getElementById('lienActiverPushClient');
-        if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
-        const registration = await navigator.serviceWorker.ready;
-        const abonnementExistant = await registration.pushManager.getSubscription();
-        if (abonnementExistant) {
-          await fetch('/compte/notifications-push/abonner', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(abonnementExistant),
-          }).catch(() => {});
-          statutEl.textContent = "🔔 Notifications activées sur cet appareil.";
-          return;
-        }
-        lien.style.display = 'inline';
-        lien.addEventListener('click', async (e) => {
-          e.preventDefault();
-          try {
-            const permission = await Notification.requestPermission();
-            if (permission !== 'granted') return;
-            const abonnement = await registration.pushManager.subscribe({
-              userVisibleOnly: true,
-              applicationServerKey: urlBase64ToUint8ArrayClient("${process.env.VAPID_PUBLIC_KEY}"),
-            });
-            await fetch('/compte/notifications-push/abonner', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(abonnement),
-            });
-            statutEl.textContent = "🔔 Notifications activées sur cet appareil.";
-            lien.style.display = 'none';
-          } catch (e) {}
-        });
-      }
-      initPushClient();
-    </script>
-    ` : ""}
     <div class="carte" style="border-color: var(--rouge);">
       <h2 style="color:var(--rouge);">Zone de danger</h2>
       <p class="souligne">La suppression de votre compte est définitive et irréversible.</p>
