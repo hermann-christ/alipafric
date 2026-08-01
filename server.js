@@ -87,6 +87,8 @@ async function envoyerEmailTransaction(email, sujet, message) {
 const CONFIG = {
   NOM_SITE: "AlipAfric",
   TAGLINE: "RECHARGE. SIMPLIFIÉ.",
+  URL_SITE: process.env.URL_SITE || "https://alipafric.onrender.com",
+  DESCRIPTION_SITE: "Rechargez votre compte Alipay en RMB depuis le Togo et l'Afrique de l'Ouest. Envoyez vos F CFA, recevez vos Yuans rapidement et en toute sécurité.",
   // Grille tarifaire par palier : plus le client commande, plus le taux est
   // avantageux. "seuilMax" = montant RMB maximum pour bénéficier de ce taux.
   PALIERS_TAUX: [
@@ -397,6 +399,66 @@ function sauvegarderSessionsAdmin() {
   sauvegarderJSON(FICHIER_SESSIONS_ADMIN, Array.from(sessionsAdmin, ([sessionId, s]) => ({ sessionId, expiration: s.expiration })));
 }
 
+// Protection anti brute-force : bloque une IP+identifiant après 5 échecs
+// de connexion sur une fenêtre glissante de 15 minutes. En mémoire (pas
+// besoin de survivre aux redémarrages pour ce cas d'usage).
+const tentativesConnexion = new Map(); // "ip|identifiant" -> { compte, dernierEchec }
+const MAX_TENTATIVES_CONNEXION = 5;
+const FENETRE_TENTATIVES_MS = 15 * 60 * 1000;
+
+function ipDe(req) {
+  return (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "inconnu").split(",")[0].trim();
+}
+function cleTentative(req, identifiant) {
+  return `${ipDe(req)}|${(identifiant || "").toLowerCase()}`;
+}
+// Renvoie 0 si la connexion est autorisée, sinon le nombre de minutes
+// restantes avant de pouvoir réessayer.
+function verifierLimiteConnexion(req, identifiant) {
+  const cle = cleTentative(req, identifiant);
+  const entree = tentativesConnexion.get(cle);
+  if (!entree) return 0;
+  if (Date.now() - entree.dernierEchec > FENETRE_TENTATIVES_MS) {
+    tentativesConnexion.delete(cle);
+    return 0;
+  }
+  if (entree.compte < MAX_TENTATIVES_CONNEXION) return 0;
+  return Math.ceil((FENETRE_TENTATIVES_MS - (Date.now() - entree.dernierEchec)) / 60000);
+}
+function enregistrerEchecConnexion(req, identifiant) {
+  const cle = cleTentative(req, identifiant);
+  const entree = tentativesConnexion.get(cle);
+  if (entree && Date.now() - entree.dernierEchec <= FENETRE_TENTATIVES_MS) {
+    entree.compte += 1;
+    entree.dernierEchec = Date.now();
+  } else {
+    tentativesConnexion.set(cle, { compte: 1, dernierEchec: Date.now() });
+  }
+}
+function reinitialiserTentativesConnexion(req, identifiant) {
+  tentativesConnexion.delete(cleTentative(req, identifiant));
+}
+
+// Réessaie un appel axios en cas d'erreur réseau ponctuelle (coupure,
+// TLS non établi, timeout...) ou d'erreur serveur 5xx. Ne réessaie pas
+// sur les erreurs 4xx (mauvaise requête, clé API invalide, etc.) car
+// réessayer ne changerait rien.
+async function axiosAvecRetry(config, tentatives = 3, delaiMs = 1000) {
+  for (let essai = 1; essai <= tentatives; essai++) {
+    try {
+      return await axios(config);
+    } catch (erreur) {
+      const statut = erreur.response?.status;
+      const dernierEssai = essai === tentatives;
+      const erreurReessayable = !statut || statut >= 500;
+      if (dernierEssai || !erreurReessayable) throw erreur;
+      console.warn(`⚠️  Appel réseau échoué (essai ${essai}/${tentatives}), nouvel essai dans ${delaiMs}ms :`, erreur.message);
+      await new Promise((r) => setTimeout(r, delaiMs));
+      delaiMs *= 2;
+    }
+  }
+}
+
 function parseCookies(req) {
   const entete = req.headers.cookie;
   const resultat = {};
@@ -619,12 +681,32 @@ function page(titre, contenuHTML, options = {}) {
   const iconePWA = estAdmin ? "/icons/icon-admin-192.png" : "/icons/icon-192.png";
   const titrePWA = estAdmin ? "AlipAfric Admin" : "AlipAfric";
   const couleurTheme = estAdmin ? "#781414" : "#1B1120";
+  // SEO : seules les pages marketing publiques (options.indexable = true)
+  // sont indexables par Google. Toutes les pages de compte/admin/privées
+  // sont en "noindex" par défaut pour ne pas exposer d'infos personnelles
+  // dans les résultats de recherche.
+  const indexable = !!options.indexable;
+  const description = options.description || CONFIG.DESCRIPTION_SITE;
+  const urlCanonique = options.urlCanonique ? `${CONFIG.URL_SITE}${options.urlCanonique}` : null;
   return `<!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${titre} — ${CONFIG.NOM_SITE}</title>
+<meta name="google-site-verification" content="7s6lUQjryuL95mb0TFWdijCT6vDraNaDS982ptQ7n9s" />
+<meta name="description" content="${description}">
+<meta name="robots" content="${indexable ? "index, follow" : "noindex, nofollow"}">
+${urlCanonique ? `<link rel="canonical" href="${urlCanonique}">` : ""}
+${indexable ? `
+<meta property="og:type" content="website">
+<meta property="og:title" content="${titre} — ${CONFIG.NOM_SITE}">
+<meta property="og:description" content="${description}">
+<meta property="og:url" content="${urlCanonique || CONFIG.URL_SITE}">
+<meta property="og:image" content="${CONFIG.URL_SITE}/favicon.png">
+<meta property="og:locale" content="fr_FR">
+<meta name="twitter:card" content="summary">
+` : ""}
 <link rel="icon" type="image/png" href="/favicon.png?v=5">
 <link rel="manifest" href="${manifeste}">
 <meta name="theme-color" content="${couleurTheme}">
@@ -936,6 +1018,21 @@ function enTeteEtHero() {
   `;
 }
 
+app.get("/robots.txt", (req, res) => {
+  res.type("text/plain").send(
+    `User-agent: *\nAllow: /$\nAllow: /inscription$\nAllow: /connexion$\nDisallow: /compte\nDisallow: /admin\nDisallow: /confirmer-email\nDisallow: /mot-de-passe-oublie\nDisallow: /reinitialiser-mot-de-passe\n\nSitemap: ${CONFIG.URL_SITE}/sitemap.xml\n`
+  );
+});
+
+app.get("/sitemap.xml", (req, res) => {
+  const urls = ["/", "/inscription", "/connexion"];
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${urls.map((u) => `  <url><loc>${CONFIG.URL_SITE}${u}</loc></url>`).join("\n")}
+</urlset>`;
+  res.type("application/xml").send(xml);
+});
+
 app.get("/", (req, res) => {
   if (req.utilisateur) return res.redirect("/compte");
 
@@ -957,7 +1054,11 @@ app.get("/", (req, res) => {
 
     <div class="pied-page">© ${new Date().getFullYear()} ${CONFIG.NOM_SITE}. Tous droits réservés.</div>
   `;
-  res.send(page(CONFIG.NOM_SITE, contenu));
+  res.send(page(CONFIG.NOM_SITE, contenu, {
+    indexable: true,
+    urlCanonique: "/",
+    description: CONFIG.DESCRIPTION_SITE,
+  }));
 });
 
 // ============================================================================
@@ -1178,13 +1279,19 @@ function pageConnexion({ identifiant = "", erreurGlobal = null } = {}) {
 app.get("/connexion", (req, res) => res.send(pageConnexion()));
 app.post("/connexion", (req, res) => {
   const { identifiant, motDePasse } = req.body;
+  const minutesRestantes = verifierLimiteConnexion(req, identifiant);
+  if (minutesRestantes > 0) {
+    return res.status(429).send(pageConnexion({ identifiant: "", erreurGlobal: `Trop de tentatives échouées. Réessayez dans ${minutesRestantes} minute(s).` }));
+  }
   const u = utilisateurs.find((x) => x.identifiant.toLowerCase() === (identifiant || "").toLowerCase());
   if (!u || !motDePasseCorrect(motDePasse || "", u.motDePasseSel, u.motDePasseHash)) {
+    enregistrerEchecConnexion(req, identifiant);
     return res.status(401).send(pageConnexion({ identifiant: "", erreurGlobal: "Identifiant ou mot de passe incorrect." }));
   }
   if (u.compteSupprime) {
     return res.status(401).send(pageConnexion({ identifiant: "", erreurGlobal: `Ce compte a été supprimé. Si vous pensez qu'il s'agit d'une erreur, contactez le support.<a class="bouton jaune petit" style="margin-top:10px;" href="mailto:${CONFIG.CONTACT_EMAIL}?subject=${encodeURIComponent("Compte supprimé par erreur — " + CONFIG.NOM_SITE)}&body=${encodeURIComponent("Bonjour,\n\nMon compte associé à l'adresse " + (identifiant || "") + " a été supprimé alors que je pense qu'il s'agit d'une erreur. Merci de vérifier.\n\nMerci.")}">Contacter le support par e-mail</a>` }));
   }
+  reinitialiserTentativesConnexion(req, identifiant);
   connecterUtilisateur(res, u.id);
   res.redirect(u.emailVerifie ? "/compte" : "/confirmer-email");
 });
@@ -1839,7 +1946,6 @@ app.post("/compte/finaliser-commande", exigerConnexion, exigerEmailVerifie, exig
     numeroExpediteur,
     imagePaiement: null,
     fichePDF: null,
-    recuPDF: null,
     raisonAnnulation: null,
     // en_attente_paiement -> preuve_recue -> paye -> effectue | annule
     statut: "en_attente_paiement",
@@ -1913,7 +2019,7 @@ app.get("/compte/transactions/:reference", exigerConnexion, exigerEmailVerifie, 
         <div class="ligne"><span>Montant envoyé</span><b>${t.total.toLocaleString("fr-FR")} XOF</b></div>
         <div class="ligne"><span>Montant reçu</span><b>¥ ${t.montantRMB}</b></div>
         <div class="ligne"><span>Référence</span><b>${t.reference}</b></div>
-        ${t.recuPDF ? `<a class="bouton jaune" href="${hrefFichier(t.recuPDF, "recus")}" target="_blank">Télécharger le reçu</a>` : ""}
+        ${t.statut === "effectue" ? `<a class="bouton jaune" href="/compte/transactions/${t.reference}/recu" target="_blank">Télécharger le reçu</a>` : ""}
       </div>
     `;
   } else {
@@ -2089,9 +2195,10 @@ app.get("/compte/support", exigerConnexion, exigerEmailVerifie, (req, res) => {
 async function genererFichePDF(t) {
   const bufferAlipay = t.alipayImage ? await bufferFichier(t.alipayImage, DOSSIER_UPLOADS_ALIPAY).catch(() => null) : null;
   const bufferPreuve = t.imagePaiement ? await bufferFichier(t.imagePaiement, DOSSIER_UPLOADS_PREUVES).catch(() => null) : null;
+  const prefixeDate = new Date(t.dateCreation || Date.now()).toISOString().slice(0, 16).replace(/[-:T]/g, "");
 
   return genererEtStockerPDF(
-    `${t.reference}.pdf`,
+    `${prefixeDate}_${t.reference}.pdf`,
     async (doc) => {
       doc.fontSize(18).fillColor("#2563EB").text(`Fiche interne — ${CONFIG.NOM_SITE}`);
       doc.moveDown(0.8);
@@ -2124,50 +2231,49 @@ async function genererFichePDF(t) {
     DOSSIER_FICHES
   );
 }
-async function genererRecuClient(t) {
+async function genererRecuBuffer(t) {
   const bufferAlipay = t.alipayImage ? await bufferFichier(t.alipayImage, DOSSIER_UPLOADS_ALIPAY).catch(() => null) : null;
   const bufferPreuve = t.imagePaiement ? await bufferFichier(t.imagePaiement, DOSSIER_UPLOADS_PREUVES).catch(() => null) : null;
 
-  return genererEtStockerPDF(
-    `${t.reference}.pdf`,
-    async (doc) => {
-      doc.fontSize(20).fillColor("#2563EB").text(CONFIG.NOM_SITE, { align: "center" });
-      doc.fontSize(12).fillColor("#555").text("Reçu de transaction", { align: "center" });
-      doc.moveDown(1.5);
-      doc.fontSize(11).fillColor("#111");
-      doc.text(`Référence : ${t.reference}`);
-      doc.text(`Client : ${t.prenomNomComplet || t.nomUtilisateur}`);
-      doc.text(`Date : ${new Date(t.dateCredit || Date.now()).toLocaleString("fr-FR")}`);
-      doc.text(`Montant reçu sur Alipay : ${t.montantRMB} RMB`);
-      doc.text(`Montant payé : ${formaterFCFA(t.total)} F CFA`);
-      doc.text(`Moyen de paiement : ${CONFIG.PAIEMENT[t.moyenPaiement]?.nom || t.moyenPaiement}`);
-      doc.moveDown(1);
-      doc.fontSize(13).fillColor("#22C55E").text("✔ Transaction effectuée avec succès", { align: "center" });
+  const doc = new PDFDocument({ margin: 40, size: "A4" });
+  const morceaux = [];
+  const bufferPromesse = new Promise((resolve, reject) => {
+    doc.on("data", (m) => morceaux.push(m));
+    doc.on("end", () => resolve(Buffer.concat(morceaux)));
+    doc.on("error", reject);
+  });
 
-      // Les deux images côte à côte, sur la même page (pas de doc.addPage()).
-      doc.moveDown(1);
-      const yImages = doc.y;
-      const largeurColonne = 220;
-      const xGauche = 50;
-      const xDroite = 595.28 - 50 - largeurColonne;
-      const hauteurMax = 400;
+  doc.fontSize(20).fillColor("#2563EB").text(CONFIG.NOM_SITE, { align: "center" });
+  doc.fontSize(12).fillColor("#555").text("Reçu de transaction", { align: "center" });
+  doc.moveDown(1.5);
+  doc.fontSize(11).fillColor("#111");
+  doc.text(`Référence : ${t.reference}`);
+  doc.text(`Client : ${t.prenomNomComplet || t.nomUtilisateur}`);
+  doc.text(`Date : ${new Date(t.dateCredit || Date.now()).toLocaleString("fr-FR")}`);
+  doc.text(`Montant reçu sur Alipay : ${t.montantRMB} RMB`);
+  doc.text(`Montant payé : ${formaterFCFA(t.total)} F CFA`);
+  doc.text(`Moyen de paiement : ${CONFIG.PAIEMENT[t.moyenPaiement]?.nom || t.moyenPaiement}`);
+  doc.moveDown(1);
+  doc.fontSize(13).fillColor("#22C55E").text("✔ Transaction effectuée avec succès", { align: "center" });
 
-      if (bufferAlipay) {
-        doc.fontSize(10).fillColor("#2563EB").text("Code QR Alipay", xGauche, yImages, { width: largeurColonne, align: "center" });
-        try {
-          doc.image(bufferAlipay, xGauche, yImages + 16, { fit: [largeurColonne, hauteurMax], align: "center" });
-        } catch (e) {}
-      }
-      if (bufferPreuve) {
-        doc.fontSize(10).fillColor("#2563EB").text("Preuve de paiement", xDroite, yImages, { width: largeurColonne, align: "center" });
-        try {
-          doc.image(bufferPreuve, xDroite, yImages + 16, { fit: [largeurColonne, hauteurMax], align: "center" });
-        } catch (e) {}
-      }
-    },
-    "recus",
-    DOSSIER_RECUS
-  );
+  doc.moveDown(1);
+  const yImages = doc.y;
+  const largeurColonne = 220;
+  const xGauche = 50;
+  const xDroite = 595.28 - 50 - largeurColonne;
+  const hauteurMax = 400;
+
+  if (bufferAlipay) {
+    doc.fontSize(10).fillColor("#2563EB").text("Code QR Alipay", xGauche, yImages, { width: largeurColonne, align: "center" });
+    try { doc.image(bufferAlipay, xGauche, yImages + 16, { fit: [largeurColonne, hauteurMax], align: "center" }); } catch (e) {}
+  }
+  if (bufferPreuve) {
+    doc.fontSize(10).fillColor("#2563EB").text("Preuve de paiement", xDroite, yImages, { width: largeurColonne, align: "center" });
+    try { doc.image(bufferPreuve, xDroite, yImages + 16, { fit: [largeurColonne, hauteurMax], align: "center" }); } catch (e) {}
+  }
+
+  doc.end();
+  return bufferPromesse;
 }
 
 // ============================================================================
@@ -2190,9 +2296,15 @@ app.get("/admin/connexion", (req, res) => {
 });
 app.post("/admin/connexion", (req, res) => {
   const { identifiant, motDePasse } = req.body;
+  const minutesRestantes = verifierLimiteConnexion(req, `admin:${identifiant}`);
+  if (minutesRestantes > 0) {
+    return res.status(429).send(page("Erreur", `<h1>Trop de tentatives échouées</h1><p class="souligne">Réessayez dans ${minutesRestantes} minute(s).</p><a href="/admin/connexion">← Retour</a>`, { admin: true }));
+  }
   if (identifiant !== CONFIG.ADMIN_IDENTIFIANT || motDePasse !== CONFIG.ADMIN_MOT_DE_PASSE) {
+    enregistrerEchecConnexion(req, `admin:${identifiant}`);
     return res.status(401).send(page("Erreur", `<h1>Identifiant ou mot de passe incorrect</h1><a href="/admin/connexion">← Réessayer</a>`, { admin: true }));
   }
+  reinitialiserTentativesConnexion(req, `admin:${identifiant}`);
   connecterAdmin(res);
   res.redirect("/admin");
 });
@@ -2401,8 +2513,6 @@ app.get("/admin/transactions", exigerAdmin, (req, res) => {
     );
   }
 
-  const totalRMB = listeFiltree.reduce((s, t) => s + t.montantRMB, 0);
-  const totalXOF = listeFiltree.reduce((s, t) => s + t.total, 0);
   const lignes = listeFiltree.reverse().map((t) => {
     const lienAlipay = hrefFichier(t.alipayImage, "uploads/alipay");
     const imgAlipay = t.alipayImage ? `<a href="${lienAlipay}" target="_blank"><img class="miniature" src="${lienAlipay}"></a>` : "—";
@@ -2422,6 +2532,9 @@ app.get("/admin/transactions", exigerAdmin, (req, res) => {
     }
     return `<tr><td>${imgAlipay}</td><td>${t.reference}</td><td>${t.identifiantUtilisateur}</td><td>${t.total.toLocaleString("fr-FR")} XOF</td><td>${t.montantRMB} RMB</td><td>${t.numeroExpediteur || "—"}</td><td>${imgPreuve}</td><td>${heurePreuve}</td><td>${CONFIG.PAIEMENT[t.moyenPaiement]?.nom || "—"}</td><td>${t.statut}</td><td>${fiche}</td><td>${actions}</td></tr>`;
   }).join("");
+
+  const totalRMB = listeFiltree.reduce((s, t) => s + t.montantRMB, 0);
+  const totalXOF = listeFiltree.reduce((s, t) => s + t.total, 0);
 
   const filtreLien = (cle, texte) => `<a href="/admin/transactions?statut=${cle}" style="${filtreStatut === cle ? "background:var(--bleu); color:#fff;" : ""}">${texte}</a>`;
 
@@ -2460,17 +2573,16 @@ app.post("/admin/transactions/:reference/regenerer-fiche", exigerAdmin, async (r
     res.status(500).send(page("Erreur", `<h1>Échec de la régénération</h1><p class="souligne">${erreur.message}</p><a href="/admin/transactions">← Retour</a>`, { admin: true }));
   }
 });
-app.post("/admin/transactions/:reference/regenerer-recu", exigerAdmin, async (req, res) => {
-  const t = transactions.find((x) => x.reference === req.params.reference);
-  if (!t) return res.redirect("/admin/transactions");
+app.get("/compte/transactions/:reference/recu", exigerConnexion, exigerEmailVerifie, async (req, res) => {
+  const t = transactions.find((x) => x.reference === req.params.reference && x.utilisateurId === req.utilisateur.id);
+  if (!t || t.statut !== "effectue") return res.redirect("/compte/transactions");
   try {
-    const { reference } = await genererRecuClient(t);
-    t.recuPDF = reference;
-    sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
-    res.redirect("/admin/transactions");
+    const buffer = await genererRecuBuffer(t);
+    res.set({ "Content-Type": "application/pdf", "Content-Disposition": `attachment; filename="${t.reference}.pdf"` });
+    res.send(buffer);
   } catch (erreur) {
-    console.error("Erreur régénération reçu :", erreur.message);
-    res.status(500).send(page("Erreur", `<h1>Échec de la régénération</h1><p class="souligne">${erreur.message}</p><a href="/admin/transactions">← Retour</a>`, { admin: true }));
+    console.error("Erreur génération reçu client :", erreur.message);
+    res.status(500).send(page("Erreur", `<h1>Échec de la génération du reçu</h1><p class="souligne">Merci de réessayer dans un instant.</p><a href="/compte/transactions">← Retour</a>`));
   }
 });
 
@@ -2510,10 +2622,6 @@ app.post("/admin/transactions/:reference/confirmer-recharge", exigerAdmin, async
       const { reference: refFiche } = await genererFichePDF(t);
       t.fichePDF = refFiche;
     } catch (e) { console.error("Erreur génération fiche interne :", e.message); }
-    try {
-      const { reference: refRecu } = await genererRecuClient(t);
-      t.recuPDF = refRecu;
-    } catch (e) { console.error("Erreur génération reçu client :", e.message); }
     sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
     ajouterNotification(t.utilisateurId, `Votre compte Alipay a été crédité de ${t.montantRMB} RMB ✔ Transaction terminée.`, t.reference);
     envoyerNotificationPushClient(t.utilisateurId, "Recharge terminée", `Votre compte Alipay a été crédité de ${t.montantRMB} RMB ✔`, `/compte/transactions/${t.reference}`).catch(() => {});
@@ -2570,17 +2678,18 @@ function extensionDepuisURL(url, parDefaut) {
 // envoyerEmail(), sans pièce jointe, pour les autres notifications).
 async function envoyerEmailAvecPieceJointe(destinataire, sujet, contenuHTML, nomFichier, buffer) {
   try {
-    await axios.post(
-      "https://api.brevo.com/v3/smtp/email",
-      {
+    await axiosAvecRetry({
+      method: "post",
+      url: "https://api.brevo.com/v3/smtp/email",
+      data: {
         sender: { name: process.env.SENDER_NAME || CONFIG.NOM_SITE, email: process.env.SENDER_EMAIL },
         to: [{ email: destinataire }],
         subject: sujet,
         htmlContent: contenuHTML,
         attachment: [{ content: buffer.toString("base64"), name: nomFichier }],
       },
-      { headers: { accept: "application/json", "api-key": process.env.BREVO_API_KEY, "content-type": "application/json" } }
-    );
+      headers: { accept: "application/json", "api-key": process.env.BREVO_API_KEY, "content-type": "application/json" },
+    });
     return true;
   } catch (erreur) {
     console.error("Erreur envoi e-mail avec pièce jointe :", erreur.response ? erreur.response.data : erreur.message);
@@ -2609,7 +2718,7 @@ async function nettoyageAutomatiqueQuotidien() {
       (t) =>
         !t.archiveEnvoyee &&
         new Date(t.dateCreation).getTime() < seuilFichiers &&
-        (t.alipayImage || t.imagePaiement || t.fichePDF || t.recuPDF)
+        (t.alipayImage || t.imagePaiement || t.fichePDF)
     );
     if (aArchiver.length === 0) return;
 
@@ -2625,7 +2734,6 @@ async function nettoyageAutomatiqueQuotidien() {
       ["alipayImage", "qr-alipay", "jpg"],
       ["imagePaiement", "preuve-paiement", "jpg"],
       ["fichePDF", "fiche-interne", "pdf"],
-      ["recuPDF", "recu-client", "pdf"],
     ];
     for (const t of aArchiver) {
       for (const [champ, nom, extDefaut] of champsAArchiver) {
@@ -2787,9 +2895,10 @@ async function envoyerEmail(destinataire, sujet, contenu, titre = sujet, bouton 
 
   // 3. Envoi de l'e-mail via Brevo
   try {
-    const response = await axios.post(
-      'https://api.brevo.com/v3/smtp/email',
-      {
+    const response = await axiosAvecRetry({
+      method: "post",
+      url: 'https://api.brevo.com/v3/smtp/email',
+      data: {
         sender: { 
           name: process.env.SENDER_NAME || "ALIPAFRIC", 
           email: process.env.SENDER_EMAIL 
@@ -2798,13 +2907,11 @@ async function envoyerEmail(destinataire, sujet, contenu, titre = sujet, bouton 
         subject: sujet,
         htmlContent: htmlComplet
       },
-      {
-        headers: {
-          'api-key': process.env.BREVO_API_KEY,
-          'Content-Type': 'application/json'
-        }
+      headers: {
+        'api-key': process.env.BREVO_API_KEY,
+        'Content-Type': 'application/json'
       }
-    );
+    });
 
     console.log(`✉️ Email envoyé avec succès à : ${destinataire}`);
     return response.data;
