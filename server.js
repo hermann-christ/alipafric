@@ -89,6 +89,11 @@ const CONFIG = {
   TAGLINE: "RECHARGE. SIMPLIFIÉ.",
   URL_SITE: process.env.URL_SITE || "https://alipafric.onrender.com",
   DESCRIPTION_SITE: "Rechargez votre compte Alipay en RMB depuis le Togo et l'Afrique de l'Ouest. Envoyez vos F CFA, recevez vos Yuans rapidement et en toute sécurité.",
+  // Liens temporaires en attendant les vraies pages/publications — à
+  // remplacer ici une fois prêts, ça se répercute automatiquement partout.
+  LIEN_FACEBOOK: "#",
+  LIEN_TIKTOK: "#",
+  LIEN_AVIS_GOOGLE: "https://www.google.com/search?q=alipafric",
   // Grille tarifaire par palier : plus le client commande, plus le taux est
   // avantageux. "seuilMax" = montant RMB maximum pour bénéficier de ce taux.
   PALIERS_TAUX: [
@@ -888,11 +893,21 @@ ${indexable ? `
   .mini-bouton.refus { background: var(--rouge); color: #fff; }
   .nav-admin { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
   .nav-admin a { font-size: 13px; font-weight: 700; color: var(--bleu); text-decoration: none; padding: 6px 12px; border: 1px solid var(--bordure); border-radius: 999px; }
+  .pied-social { display: flex; justify-content: center; gap: 18px; margin: 24px 0 4px; }
+  .pied-social a { color: var(--texte-att); font-size: 12.5px; font-weight: 700; text-decoration: none; display: flex; align-items: center; gap: 5px; }
+  .pied-social a:hover { color: var(--texte); }
 </style>
 </head>
 <body>
   <div class="${classeCarte}">
     ${contenuHTML}
+    ${estAdmin ? "" : `
+    <div class="pied-social">
+      <a href="${CONFIG.LIEN_FACEBOOK}" target="_blank" rel="noopener">📘 Facebook</a>
+      <a href="${CONFIG.LIEN_TIKTOK}" target="_blank" rel="noopener">🎵 TikTok</a>
+      <a href="${CONFIG.LIEN_AVIS_GOOGLE}" target="_blank" rel="noopener">⭐ Avis Google</a>
+    </div>
+    `}
   </div>
   <button id="btnInstallerApp" class="bouton jaune" style="display:none; position:fixed; bottom:18px; right:18px; left:auto; width:auto; margin:0; padding:12px 18px; z-index:999; box-shadow:0 6px 18px rgba(0,0,0,0.45); border-radius:999px;">📲 Installer l'application</button>
   <script>
@@ -1035,7 +1050,12 @@ ${urls.map((u) => `  <url><loc>${CONFIG.URL_SITE}${u}</loc></url>`).join("\n")}
 
 app.get("/blog/recharger-alipay-depuis-le-togo", (req, res) => {
   const contenu = `
-    ${enTeteEtHero()}
+    <header class="entete" style="margin: -20px -16px 24px; padding: 16px 24px;">
+      <a class="logo" href="/">
+        <div class="logo-icone"><img src="/logos/logo.png" alt="ALIPAFRIC"></div>
+        <div class="logo-texte"><b>ALIPA<span>FRIC</span></b><small>${CONFIG.TAGLINE}</small></div>
+      </a>
+    </header>
     <article class="carte">
       <h1>Comment recharger son compte Alipay depuis le Togo (guide 2026)</h1>
       <p class="souligne">Vous importez depuis la Chine (Alibaba, 1688, Taobao) ou vous voyagez bientôt là-bas ? Voici comment créditer votre compte Alipay en Yuans (RMB) depuis le Togo, en toute sécurité.</p>
