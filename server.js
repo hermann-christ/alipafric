@@ -1020,17 +1020,54 @@ function enTeteEtHero() {
 
 app.get("/robots.txt", (req, res) => {
   res.type("text/plain").send(
-    `User-agent: *\nAllow: /$\nAllow: /inscription$\nAllow: /connexion$\nDisallow: /compte\nDisallow: /admin\nDisallow: /confirmer-email\nDisallow: /mot-de-passe-oublie\nDisallow: /reinitialiser-mot-de-passe\n\nSitemap: ${CONFIG.URL_SITE}/sitemap.xml\n`
+    `User-agent: *\nAllow: /$\nAllow: /inscription$\nAllow: /connexion$\nAllow: /blog/\nDisallow: /compte\nDisallow: /admin\nDisallow: /confirmer-email\nDisallow: /mot-de-passe-oublie\nDisallow: /reinitialiser-mot-de-passe\n\nSitemap: ${CONFIG.URL_SITE}/sitemap.xml\n`
   );
 });
 
 app.get("/sitemap.xml", (req, res) => {
-  const urls = ["/", "/inscription", "/connexion"];
+  const urls = ["/", "/inscription", "/connexion", "/blog/recharger-alipay-depuis-le-togo"];
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 ${urls.map((u) => `  <url><loc>${CONFIG.URL_SITE}${u}</loc></url>`).join("\n")}
 </urlset>`;
   res.type("application/xml").send(xml);
+});
+
+app.get("/blog/recharger-alipay-depuis-le-togo", (req, res) => {
+  const contenu = `
+    ${enTeteEtHero()}
+    <article class="carte">
+      <h1>Comment recharger son compte Alipay depuis le Togo (guide 2026)</h1>
+      <p class="souligne">Vous importez depuis la Chine (Alibaba, 1688, Taobao) ou vous voyagez bientôt là-bas ? Voici comment créditer votre compte Alipay en Yuans (RMB) depuis le Togo, en toute sécurité.</p>
+
+      <h2>Pourquoi c'est difficile de recharger Alipay directement depuis l'Afrique</h2>
+      <p style="color:var(--texte-att); font-size:14px; line-height:1.7; margin-bottom:16px;">Alipay est une plateforme chinoise : elle n'accepte pas directement les cartes bancaires ou le Mobile Money émis en Afrique de l'Ouest. Pour créditer un compte Alipay depuis le Togo, il faut passer par un intermédiaire qui reçoit vos F CFA localement et transfère l'équivalent en RMB sur votre compte Alipay.</p>
+
+      <h2>Les 3 étapes pour recharger votre Alipay avec ${CONFIG.NOM_SITE}</h2>
+      <div class="etape-carte"><div class="etape-numero">1</div><div class="etape-texte"><b>Créez votre compte et faites vérifier votre identité</b><span>Une pièce d'identité valide est nécessaire avant toute première recharge, pour la sécurité de tous.</span></div></div>
+      <div class="etape-carte"><div class="etape-numero">2</div><div class="etape-texte"><b>Indiquez le montant et le QR code de votre profil Alipay</b><span>Ouvrez l'app Alipay → "Recevoir de l'argent" → capturez le QR code.</span></div></div>
+      <div class="etape-carte"><div class="etape-numero">3</div><div class="etape-texte"><b>Payez en F CFA (Mobile Money, virement...) et recevez vos RMB</b><span>Une fois le paiement confirmé, votre compte Alipay est crédité rapidement.</span></div></div>
+
+      <h2>Le compte Alipay doit être vérifié</h2>
+      <p style="color:var(--texte-att); font-size:14px; line-height:1.7; margin-bottom:16px;">Alipay peut bloquer les fonds reçus sur un compte non vérifié — un problème entre vous et Alipay, indépendant de l'intermédiaire utilisé. Vérifiez toujours votre compte Alipay (pièce d'identité chinoise ou passeport, selon les options disponibles) avant de demander une recharge importante.</p>
+
+      <h2>Combien ça coûte ?</h2>
+      <p style="color:var(--texte-att); font-size:14px; line-height:1.7; margin-bottom:16px;">Le taux appliqué dépend du montant : plus vous rechargez, plus le taux F CFA/Yuan est avantageux. Consultez la grille tarifaire à jour ci-dessous.</p>
+      ${grilleTarifaireHTML()}
+
+      <h2>Questions fréquentes</h2>
+      <p style="color:var(--texte-att); font-size:14px; line-height:1.7; margin-bottom:4px;"><b style="color:var(--texte);">Combien de temps prend une recharge ?</b><br>En général quelques heures après confirmation du paiement, selon l'affluence.</p>
+      <p style="color:var(--texte-att); font-size:14px; line-height:1.7; margin-bottom:4px;"><b style="color:var(--texte);">Puis-je recharger sans vérifier mon identité ?</b><br>Non, la vérification d'identité est obligatoire avant la première recharge, pour la sécurité de la plateforme et de vos fonds.</p>
+      <p style="color:var(--texte-att); font-size:14px; line-height:1.7; margin-bottom:16px;"><b style="color:var(--texte);">Le service fonctionne-t-il hors du Togo ?</b><br>Certains moyens de paiement (Mixx By Yas, Moov Money) sont réservés aux numéros togolais ; d'autres options restent disponibles pour le reste de l'Afrique de l'Ouest.</p>
+
+      <a class="bouton jaune" href="/inscription#formulaire">Créer mon compte et recharger mon Alipay</a>
+    </article>
+  `;
+  res.send(page("Comment recharger Alipay depuis le Togo", contenu, {
+    indexable: true,
+    urlCanonique: "/blog/recharger-alipay-depuis-le-togo",
+    description: "Guide complet pour recharger votre compte Alipay en RMB depuis le Togo : étapes, vérification du compte, tarifs et questions fréquentes.",
+  }));
 });
 
 app.get("/", (req, res) => {
@@ -1052,7 +1089,7 @@ app.get("/", (req, res) => {
       <div class="pilier"><div class="icone">🎧</div><b>Support 24/7</b></div>
     </div>
 
-    <div class="pied-page">© ${new Date().getFullYear()} ${CONFIG.NOM_SITE}. Tous droits réservés.</div>
+    <div class="pied-page">© ${new Date().getFullYear()} ${CONFIG.NOM_SITE}. Tous droits réservés. — <a href="/blog/recharger-alipay-depuis-le-togo" style="color:var(--texte-att);">Guide : recharger Alipay depuis le Togo</a></div>
   `;
   res.send(page(CONFIG.NOM_SITE, contenu, {
     indexable: true,
