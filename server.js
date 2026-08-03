@@ -97,9 +97,9 @@ const CONFIG = {
   // Grille tarifaire par palier : plus le client commande, plus le taux est
   // avantageux. "seuilMax" = montant RMB maximum pour bénéficier de ce taux.
   PALIERS_TAUX: [
-    { seuilMax: 99.99, taux: 95 },
-    { seuilMax: 999.99, taux: 93 },
-    { seuilMax: Infinity, taux: 92 },
+    { seuilMax: 99.99, taux: 98 },
+    { seuilMax: 999.99, taux: 96 },
+    { seuilMax: Infinity, taux: 94 },
   ],
   MONTANT_MIN_RMB: 50,
   FRAIS_POURCENT: 0, // Frais de service désactivés
@@ -1027,7 +1027,7 @@ function enTeteEtHero() {
 
     <div class="taux-boite">
       <span>Le Yuan à partir de</span>
-      <b>93 F CFA</b>
+      <b>96 F CFA</b>
       <span style="display:block; margin-top:6px; text-transform:none; letter-spacing:0; font-size:14.5px; font-weight:700; color:var(--jaune);">Plus vous achetez, plus le taux baisse !</span>
     </div>
   `;
