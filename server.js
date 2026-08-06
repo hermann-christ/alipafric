@@ -35,6 +35,13 @@ process.on("uncaughtException", (erreur) => {
 // 2. Servir le dossier public
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Google (et les navigateurs) vérifient systématiquement /favicon.ico par
+// convention, en plus du <link rel="icon"> dans le head. Sans cette route,
+// Google peut afficher une icône générique au lieu de notre logo.
+app.get("/favicon.ico", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "favicon.png"));
+});
+
 // Route simple pour garder le serveur éveillé avec UptimeRobot
 app.get('/ping', (req, res) => {
   res.status(200).send('OK');
@@ -91,9 +98,9 @@ const CONFIG = {
   DESCRIPTION_SITE: "Rechargez votre compte Alipay en RMB depuis le Togo et l'Afrique de l'Ouest. Envoyez vos F CFA, recevez vos Yuans rapidement et en toute sécurité.",
   // Liens temporaires en attendant les vraies pages/publications — à
   // remplacer ici une fois prêts, ça se répercute automatiquement partout.
-  LIEN_FACEBOOK: "#",
-  LIEN_TIKTOK: "#",
-  LIEN_AVIS_GOOGLE: "https://www.google.com/search?q=alipafric",
+  LIEN_FACEBOOK: "https://www.facebook.com/share/p/14ggpRnyQcg/",
+  LIEN_TIKTOK: "https://vt.tiktok.com/ZS4yWRCQ1/",
+  LIEN_AVIS_GOOGLE: "https://g.page/r/CexyB_JPJ6qeEBM/review",
   // Grille tarifaire par palier : plus le client commande, plus le taux est
   // avantageux. "seuilMax" = montant RMB maximum pour bénéficier de ce taux.
   PALIERS_TAUX: [
@@ -124,18 +131,32 @@ const CONFIG = {
   },
 };
 
-// Pays d'Afrique de l'Ouest utilisant le Franc CFA (XOF) — zone UEMOA.
+// Pays utilisant le Franc CFA. Zone "UEMOA" (Afrique de l'Ouest, XOF) :
+// tous les moyens de paiement disponibles selon togoUniquement. Zone
+// "CEMAC" (Afrique centrale, XAF) : seul Ecobank est disponible pour eux.
 // "chiffres" = nombre de chiffres attendu après l'indicatif (à ajuster si besoin).
 const PAYS = [
-  { indicatif: "+228", nom: "Togo", chiffres: 8 },
-  { indicatif: "+229", nom: "Bénin", chiffres: 8 },
-  { indicatif: "+226", nom: "Burkina Faso", chiffres: 8 },
-  { indicatif: "+225", nom: "Côte d'Ivoire", chiffres: 10 },
-  { indicatif: "+245", nom: "Guinée-Bissau", chiffres: 7 },
-  { indicatif: "+223", nom: "Mali", chiffres: 8 },
-  { indicatif: "+227", nom: "Niger", chiffres: 8 },
-  { indicatif: "+221", nom: "Sénégal", chiffres: 9 },
+  { indicatif: "+228", nom: "Togo", chiffres: 8, zone: "UEMOA" },
+  { indicatif: "+229", nom: "Bénin", chiffres: 8, zone: "UEMOA" },
+  { indicatif: "+226", nom: "Burkina Faso", chiffres: 8, zone: "UEMOA" },
+  { indicatif: "+225", nom: "Côte d'Ivoire", chiffres: 10, zone: "UEMOA" },
+  { indicatif: "+245", nom: "Guinée-Bissau", chiffres: 7, zone: "UEMOA" },
+  { indicatif: "+223", nom: "Mali", chiffres: 8, zone: "UEMOA" },
+  { indicatif: "+227", nom: "Niger", chiffres: 8, zone: "UEMOA" },
+  { indicatif: "+221", nom: "Sénégal", chiffres: 9, zone: "UEMOA" },
+  { indicatif: "+237", nom: "Cameroun", chiffres: 9, zone: "CEMAC" },
+  { indicatif: "+241", nom: "Gabon", chiffres: 8, zone: "CEMAC" },
+  { indicatif: "+242", nom: "Congo", chiffres: 9, zone: "CEMAC" },
+  { indicatif: "+235", nom: "Tchad", chiffres: 8, zone: "CEMAC" },
+  { indicatif: "+236", nom: "République centrafricaine", chiffres: 8, zone: "CEMAC" },
+  { indicatif: "+240", nom: "Guinée équatoriale", chiffres: 9, zone: "CEMAC" },
 ];
+
+// Renvoie "UEMOA", "CEMAC", ou null si le numéro ne correspond à aucun pays connu.
+function zonePourTelephone(telephone) {
+  const p = PAYS.find((p) => (telephone || "").trim().startsWith(p.indicatif));
+  return p ? p.zone : null;
+}
 
 const MESSAGE_REFUS_IDENTITE = "Soit nom différent à la pièce, soit pièce illisible.";
 const MESSAGE_PAIEMENT_ANNULE = `Votre paiement a été annulé. Merci de nous contacter par e-mail (${CONFIG.CONTACT_EMAIL}) ou WhatsApp pour une prise en charge.`;
@@ -705,12 +726,21 @@ function page(titre, contenuHTML, options = {}) {
 ${urlCanonique ? `<link rel="canonical" href="${urlCanonique}">` : ""}
 ${indexable ? `
 <meta property="og:type" content="website">
+<meta property="og:site_name" content="${CONFIG.NOM_SITE}">
 <meta property="og:title" content="${titre} — ${CONFIG.NOM_SITE}">
 <meta property="og:description" content="${description}">
 <meta property="og:url" content="${urlCanonique || CONFIG.URL_SITE}">
 <meta property="og:image" content="${CONFIG.URL_SITE}/favicon.png">
 <meta property="og:locale" content="fr_FR">
 <meta name="twitter:card" content="summary">
+<script type="application/ld+json">${JSON.stringify({
+  "@context": "https://schema.org",
+  "@type": "Organization",
+  name: CONFIG.NOM_SITE,
+  url: CONFIG.URL_SITE,
+  logo: `${CONFIG.URL_SITE}/favicon.png`,
+  description: CONFIG.DESCRIPTION_SITE,
+})}</script>
 ` : ""}
 <link rel="icon" type="image/png" href="/favicon.png?v=5">
 <link rel="manifest" href="${manifeste}">
@@ -1111,7 +1141,7 @@ app.get("/", (req, res) => {
 
     <div class="pied-page">© ${new Date().getFullYear()} ${CONFIG.NOM_SITE}. Tous droits réservés. — <a href="/blog/recharger-alipay-depuis-le-togo" style="color:var(--texte-att);">Guide : recharger Alipay depuis le Togo</a></div>
   `;
-  res.send(page(CONFIG.NOM_SITE, contenu, {
+  res.send(page("Recharge Alipay depuis l'Afrique", contenu, {
     indexable: true,
     urlCanonique: "/",
     description: CONFIG.DESCRIPTION_SITE,
@@ -1551,7 +1581,7 @@ app.get("/compte", exigerConnexion, exigerEmailVerifie, (req, res) => {
     ` : ""}
     <div class="taux-boite">
       <span>Le Yuan à partir de</span>
-      <b>93 F CFA</b>
+      <b>96 F CFA</b>
       <span style="display:block; margin-top:6px; text-transform:none; letter-spacing:0; font-size:14.5px; font-weight:700; color:var(--jaune);">Plus vous achetez, plus le taux baisse !</span>
     </div>
     ${u.statutVerification === "verifie" ? `<a class="bouton jaune" href="/compte/nouvelle-demande">Recharger mon Alipay</a>` : ""}
@@ -1820,7 +1850,10 @@ app.get("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerV
 });
 function pageMoyenPaiement(req, montant, referenceImage, moyenPrecedent = "", numeroPrecedent = "") {
   const estTogo = (req.utilisateur.telephone || "").trim().startsWith("+228");
+  const zone = zonePourTelephone(req.utilisateur.telephone);
+  const estCEMAC = zone === "CEMAC";
   const optionsPaiement = Object.entries(CONFIG.PAIEMENT)
+    .filter(([cle]) => (estCEMAC ? cle === "ecobank" : true))
     .filter(([, info]) => estTogo || !info.togoUniquement)
     .map(([cle, info]) => `
       <label class="moyen-option${cle === moyenPrecedent ? " selectionne" : ""}" data-cle="${cle}" data-type="${info.typeSaisie}" onclick="selectionnerMoyen(this)">
@@ -1834,7 +1867,7 @@ function pageMoyenPaiement(req, montant, referenceImage, moyenPrecedent = "", nu
     ${entete("accueil", req.utilisateur)}
     ${stepper(2, ETAPES)}
     <h1>Moyen de paiement</h1>
-    <p class="souligne">Sélectionnez votre méthode de paiement préférée.${!estTogo ? " Mixx By Yas et Moov Money sont réservés aux numéros togolais." : ""}</p>
+    <p class="souligne">Sélectionnez votre méthode de paiement préférée.${estCEMAC ? " Seul Ecobank est disponible pour les paiements depuis votre pays." : !estTogo ? " Mixx By Yas et Moov Money sont réservés aux numéros togolais." : ""}</p>
     <div class="carte">
       <form method="POST" action="/compte/choisir-paiement">
         <input type="hidden" name="montantRMB" value="${montant}">
@@ -1919,6 +1952,9 @@ app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exiger
   }
   if (info.togoUniquement && !(req.utilisateur.telephone || "").trim().startsWith("+228")) {
     return res.status(400).send(page("Erreur", `<h1>Moyen de paiement indisponible</h1><p class="souligne">Mixx By Yas et Moov Money sont réservés aux comptes avec un numéro togolais. Utilisez Ecobank ou PI-SPI.</p><a href="/compte/nouvelle-demande">← Recommencer</a>`));
+  }
+  if (zonePourTelephone(req.utilisateur.telephone) === "CEMAC" && moyenPaiement !== "ecobank") {
+    return res.status(400).send(page("Erreur", `<h1>Moyen de paiement indisponible</h1><p class="souligne">Seul Ecobank est disponible pour les paiements depuis votre pays.</p><a href="/compte/nouvelle-demande">← Recommencer</a>`));
   }
   if (info.typeSaisie === "telephone" && !/^\d{8}$/.test(numeroExpediteur.trim())) {
     return res.status(400).send(page("Erreur", `<h1>Numéro invalide</h1><p class="souligne">Le numéro utilisé pour le dépôt doit contenir exactement 8 chiffres.</p><a href="/compte/nouvelle-demande">← Recommencer</a>`));
@@ -2078,6 +2114,13 @@ app.get("/compte/transactions/:reference", exigerConnexion, exigerEmailVerifie, 
         <div class="ligne"><span>Référence</span><b>${t.reference}</b></div>
         ${t.statut === "effectue" ? `<a class="bouton jaune" href="/compte/transactions/${t.reference}/recu" target="_blank">Télécharger le reçu</a>` : ""}
       </div>
+      <div class="carte" style="text-align:center;">
+        <p style="font-weight:700; margin-bottom:4px;">😊 Content de votre recharge ?</p>
+        <p class="souligne" style="margin-bottom:14px;">Un petit commentaire nous aide énormément à faire connaître ${CONFIG.NOM_SITE}.</p>
+        <div style="display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">
+          <a class="bouton jaune petit" href="${CONFIG.LIEN_AVIS_GOOGLE}" target="_blank" rel="noopener">⭐ Avis Google</a>
+          <a class="bouton fantome petit" href="${CONFIG.LIEN_FACEBOOK}" target="_blank" rel="noopener">📘 Commenter sur Facebook</a>
+        </div>
     `;
   } else {
     contenuSpecifique = `
@@ -2687,7 +2730,7 @@ app.post("/admin/transactions/:reference/confirmer-recharge", exigerAdmin, async
     envoyerEmailTransaction(
       t.identifiantUtilisateur,
       `Recharge effectuée — Commande ${t.reference}`,
-      `Votre compte Alipay a été crédité de <b>${t.montantRMB} RMB</b> avec succès ! Votre reçu est désormais disponible sur votre espace client.`
+      `Votre compte Alipay a été crédité de <b>${t.montantRMB} RMB</b> avec succès ! Votre reçu est désormais disponible sur votre espace client.<br><br>Content de votre expérience ? Un petit avis nous aide énormément 🙏 <a href="${CONFIG.LIEN_AVIS_GOOGLE}">⭐ Laisser un avis Google</a>`
     ).catch((err) => console.error("Erreur e-mail recharge :", err.message));
   res.redirect("/admin/transactions");
 });
