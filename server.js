@@ -164,7 +164,7 @@ const CONFIG = {
 
   CONTACT_EMAIL: "sherlockgroup1@gmail.com",
   NOM_TITULAIRE_COMPTE: "EDZI Hermann Christ",
-  CONTACT_WHATSAPP: "22892908235",
+  CONTACT_WHATSAPP: "22899248336",
 
   PAIEMENT: {
     mixx: { nom: "Mixx By Yas Togo", numero: "+228 92908235", logo: "mixx.png", noteFrais: true, typeSaisie: "telephone", togoUniquement: true },
@@ -2211,7 +2211,7 @@ function pageMoyenPaiement(req, montant, referenceImage, moyenPrecedent = "", nu
           champ.setAttribute('inputmode', 'numeric');
           champ.setAttribute('pattern', '[0-9]{8}');
           champ.maxLength = 8;
-          champ.placeholder = 'ex : 92908235';
+          champ.placeholder = 'ex : 99248336';
           champ.value = champ.value.replace(/\\D/g, '').slice(0, 8);
           champ.oninput = function () { this.value = this.value.replace(/\\D/g, '').slice(0, 8); };
         } else if (type === 'compte') {
