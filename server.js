@@ -150,15 +150,15 @@ const CONFIG = {
 // "chiffres" = nombre de chiffres attendu après l'indicatif (à ajuster si besoin).
 const PAYS = [
   { indicatif: "+228", nom: "Togo", chiffres: 8, zone: "UEMOA" },
-  { indicatif: "+229", nom: "Bénin", chiffres: 8, zone: "UEMOA" },
+  { indicatif: "+229", nom: "Bénin", chiffres: 10, zone: "UEMOA" },
   { indicatif: "+226", nom: "Burkina Faso", chiffres: 8, zone: "UEMOA" },
   { indicatif: "+225", nom: "Côte d'Ivoire", chiffres: 10, zone: "UEMOA" },
-  { indicatif: "+245", nom: "Guinée-Bissau", chiffres: 7, zone: "UEMOA" },
+  { indicatif: "+245", nom: "Guinée-Bissau", chiffres: 9, zone: "UEMOA" },
   { indicatif: "+223", nom: "Mali", chiffres: 8, zone: "UEMOA" },
   { indicatif: "+227", nom: "Niger", chiffres: 8, zone: "UEMOA" },
   { indicatif: "+221", nom: "Sénégal", chiffres: 9, zone: "UEMOA" },
   { indicatif: "+237", nom: "Cameroun", chiffres: 9, zone: "CEMAC" },
-  { indicatif: "+241", nom: "Gabon", chiffres: 8, zone: "CEMAC" },
+  { indicatif: "+241", nom: "Gabon", chiffres: 7, zone: "CEMAC" },
   { indicatif: "+242", nom: "Congo", chiffres: 9, zone: "CEMAC" },
   { indicatif: "+235", nom: "Tchad", chiffres: 8, zone: "CEMAC" },
   { indicatif: "+236", nom: "République centrafricaine", chiffres: 8, zone: "CEMAC" },
@@ -1946,6 +1946,12 @@ app.get("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerP
         <p class="souligne" id="apercuMontant" style="margin:6px 0 0;">Indiquez un montant pour voir le taux et le total.</p>
         <p id="astuceMontant" style="display:none; background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.3); color: #FBBF6B; border-radius: 8px; padding: 8px 12px; font-size: 12.5px; margin: 8px 0 0;"></p>
 
+        <label for="nomCompteAlipay">Nom complet du titulaire du compte Alipay</label>
+        <input type="text" id="nomCompteAlipay" name="nomCompteAlipay" placeholder="Tel qu'affiché sur votre profil Alipay" value="${req.query.nomCompteAlipay || ""}" required>
+
+        <label for="telephoneCompteAlipay">Numéro de téléphone relié au compte Alipay</label>
+        <input type="text" id="telephoneCompteAlipay" name="telephoneCompteAlipay" placeholder="Numéro utilisé pour créer le compte Alipay" value="${req.query.telephoneCompteAlipay || ""}" required>
+
         <label for="alipayImage">Code QR de votre profil Alipay</label>
         <div class="avertissement">⚠️ Le compte Alipay doit être <b>vérifié</b>, sinon Alipay peut bloquer les fonds et ${CONFIG.NOM_SITE} ne pourra pas intervenir.</div>
         <div class="zone-fichier">
@@ -2017,7 +2023,7 @@ app.get("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerP
   `;
   res.send(page("Nouvelle recharge", contenu));
 });
-function pageMoyenPaiement(req, montant, referenceImage, moyenPrecedent = "", numeroPrecedent = "") {
+function pageMoyenPaiement(req, montant, referenceImage, moyenPrecedent = "", numeroPrecedent = "", nomCompteAlipay = "", telephoneCompteAlipay = "", nomExpediteurPrecedent = "") {
   const estTogo = (req.utilisateur.telephone || "").trim().startsWith("+228");
   const zone = zonePourTelephone(req.utilisateur.telephone);
   const estCEMAC = zone === "CEMAC";
@@ -2041,7 +2047,12 @@ function pageMoyenPaiement(req, montant, referenceImage, moyenPrecedent = "", nu
       <form method="POST" action="/compte/choisir-paiement">
         <input type="hidden" name="montantRMB" value="${montant}">
         <input type="hidden" name="alipayImage" value="${referenceImage}">
+        <input type="hidden" name="nomCompteAlipay" value="${nomCompteAlipay}">
+        <input type="hidden" name="telephoneCompteAlipay" value="${telephoneCompteAlipay}">
         ${optionsPaiement}
+
+        <label for="nomExpediteur">Nom du titulaire du compte utilisé pour le paiement</label>
+        <input type="text" id="nomExpediteur" name="nomExpediteur" placeholder="Nom complet tel qu'enregistré sur le compte" value="${nomExpediteurPrecedent}" required>
 
         <label for="numeroExpediteur" id="labelNumeroExpediteur">Numéro ou compte utilisé pour le dépôt</label>
         <input type="text" id="numeroExpediteur" name="numeroExpediteur" placeholder="Sélectionnez d'abord un moyen de paiement" value="${numeroPrecedent}" required>
@@ -2049,7 +2060,7 @@ function pageMoyenPaiement(req, montant, referenceImage, moyenPrecedent = "", nu
 
         <button type="submit">Continuer</button>
       </form>
-      <a class="lien-discret" href="/compte/nouvelle-demande?montantRMB=${montant}&alipayImage=${encodeURIComponent(referenceImage)}">← Précédent</a>
+      <a class="lien-discret" href="/compte/nouvelle-demande?montantRMB=${montant}&alipayImage=${encodeURIComponent(referenceImage)}&nomCompteAlipay=${encodeURIComponent(nomCompteAlipay)}&telephoneCompteAlipay=${encodeURIComponent(telephoneCompteAlipay)}">← Précédent</a>
     </div>
     <script>
       function selectionnerMoyen(labelClique) {
@@ -2088,7 +2099,7 @@ app.get("/compte/nouvelle-demande/paiement", exigerConnexion, exigerEmailVerifie
   const montant = parseFloat(req.query.montantRMB);
   const referenceImage = req.query.alipayImage;
   if (!montant || !referenceImage) return res.redirect("/compte/nouvelle-demande");
-  res.send(page("Moyen de paiement", pageMoyenPaiement(req, montant, referenceImage, req.query.moyenPaiement || "", req.query.numeroExpediteur || "")));
+  res.send(page("Moyen de paiement", pageMoyenPaiement(req, montant, referenceImage, req.query.moyenPaiement || "", req.query.numeroExpediteur || "", req.query.nomCompteAlipay || "", req.query.telephoneCompteAlipay || "", req.query.nomExpediteur || "")));
 });
 app.post("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerProfilComplet, uploadAlipay.single("alipayImage"), async (req, res) => {
   const montant = parseFloat(req.body.montantRMB);
@@ -2117,17 +2128,20 @@ app.post("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exiger
     }
   }
 
-  res.send(page("Moyen de paiement", pageMoyenPaiement(req, montant, referenceImage)));
+  res.send(page("Moyen de paiement", pageMoyenPaiement(req, montant, referenceImage, "", "", req.body.nomCompteAlipay || "", req.body.telephoneCompteAlipay || "")));
 });
 
 // Étape 3 : simple récapitulatif — RIEN n'est encore enregistré. Le clic sur
 // "J'ai payé" (voir plus bas) est ce qui crée réellement la transaction.
 app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exigerProfilComplet, (req, res) => {
-  const { montantRMB, alipayImage, moyenPaiement, numeroExpediteur } = req.body;
+  const { montantRMB, alipayImage, moyenPaiement, numeroExpediteur, nomExpediteur, nomCompteAlipay, telephoneCompteAlipay } = req.body;
   const montant = parseFloat(montantRMB);
   const info = CONFIG.PAIEMENT[moyenPaiement];
-  if (!montant || !alipayImage || !info || !numeroExpediteur) {
+  if (!montant || !alipayImage || !info || !numeroExpediteur || !nomExpediteur) {
     return res.status(400).send(page("Erreur", `<h1>Requête invalide</h1><a href="/compte/nouvelle-demande">← Recommencer</a>`));
+  }
+  if (nomExpediteur.trim().length < 3) {
+    return res.status(400).send(page("Erreur", `<h1>Nom invalide</h1><p class="souligne">Merci d'indiquer le nom complet du titulaire du compte utilisé pour le paiement.</p><a href="/compte/nouvelle-demande">← Recommencer</a>`));
   }
   if (info.togoUniquement && !(req.utilisateur.telephone || "").trim().startsWith("+228")) {
     return res.status(400).send(page("Erreur", `<h1>Moyen de paiement indisponible</h1><p class="souligne">Mixx By Yas et Moov Money sont réservés aux comptes avec un numéro togolais. Utilisez Ecobank ou PI-SPI.</p><a href="/compte/nouvelle-demande">← Recommencer</a>`));
@@ -2157,8 +2171,10 @@ app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exiger
       <div class="ligne"><span>Le bénéficiaire reçoit</span><b>${montant} RMB</b></div>
       ${frais > 0 ? `<div class="ligne"><span>Frais de service (${CONFIG.FRAIS_POURCENT}%)</span><b>+ ${frais.toLocaleString("fr-FR")} XOF</b></div>` : ""}
       <div class="ligne"><span>Via</span><b>${info.nom}</b></div>
+      <div class="ligne"><span>Titulaire du compte</span><b>${nomExpediteur}</b></div>
       <div class="ligne"><span>Numéro utilisé pour le dépôt</span><b>${numeroExpediteur}</b></div>
       <div class="ligne"><span>Total à payer</span><b style="font-size:18px; color:var(--jaune);">${total.toLocaleString("fr-FR")} XOF</b></div>
+      <p class="souligne" style="margin:8px 0 0;">⏱️ Une fois payé, la recharge Alipay prend en général entre 5 minutes et 2 heures (jusqu'à 24h en cas de forte affluence).</p>
 
       <p class="souligne" style="margin:14px 0 0;">Voici le numéro sur lequel il faut transférer les fonds :</p>
       <div class="boite-paiement">
@@ -2172,13 +2188,16 @@ app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exiger
         <input type="hidden" name="alipayImage" value="${alipayImage}">
         <input type="hidden" name="moyenPaiement" value="${moyenPaiement}">
         <input type="hidden" name="numeroExpediteur" value="${numeroExpediteur}">
+        <input type="hidden" name="nomExpediteur" value="${nomExpediteur}">
+        <input type="hidden" name="nomCompteAlipay" value="${nomCompteAlipay || ""}">
+        <input type="hidden" name="telephoneCompteAlipay" value="${telephoneCompteAlipay || ""}">
         <label style="display:flex; align-items:flex-start; gap:8px; text-transform:none; font-weight:400; color:var(--texte-att); margin-top:14px; font-size:13px;">
           <input type="checkbox" name="cguTransaction" value="oui" style="width:auto; margin-top:2px;" required>
           <span>Je confirme avoir lu et j'accepte les <a href="/conditions-utilisation" target="_blank" class="souligne">Conditions Générales d'Utilisation et de Vente (CGU/CGV)</a>, notamment concernant la correspondance de nom du compte utilisé pour le dépôt.</span>
         </label>
         <button type="submit" class="jaune">J'ai payé</button>
       </form>
-      <a class="lien-discret" href="/compte/nouvelle-demande/paiement?montantRMB=${montant}&alipayImage=${encodeURIComponent(alipayImage)}&moyenPaiement=${encodeURIComponent(moyenPaiement)}&numeroExpediteur=${encodeURIComponent(numeroExpediteur)}">← Précédent</a>
+      <a class="lien-discret" href="/compte/nouvelle-demande/paiement?montantRMB=${montant}&alipayImage=${encodeURIComponent(alipayImage)}&moyenPaiement=${encodeURIComponent(moyenPaiement)}&numeroExpediteur=${encodeURIComponent(numeroExpediteur)}&nomExpediteur=${encodeURIComponent(nomExpediteur)}&nomCompteAlipay=${encodeURIComponent(nomCompteAlipay || "")}&telephoneCompteAlipay=${encodeURIComponent(telephoneCompteAlipay || "")}">← Précédent</a>
     </div>
   `;
   res.send(page("Confirmation", contenu));
@@ -2187,9 +2206,9 @@ app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exiger
 // C'est cette étape qui crée réellement la transaction. Si le client
 // abandonne avant, rien n'est enregistré : il repart de zéro.
 app.post("/compte/finaliser-commande", exigerConnexion, exigerEmailVerifie, exigerProfilComplet, (req, res) => {
-  const { montantRMB, alipayImage, moyenPaiement, numeroExpediteur, cguTransaction } = req.body;
+  const { montantRMB, alipayImage, moyenPaiement, numeroExpediteur, nomExpediteur, nomCompteAlipay, telephoneCompteAlipay, cguTransaction } = req.body;
   const montant = parseFloat(montantRMB);
-  if (!montant || !alipayImage || !CONFIG.PAIEMENT[moyenPaiement] || !numeroExpediteur) {
+  if (!montant || !alipayImage || !CONFIG.PAIEMENT[moyenPaiement] || !numeroExpediteur || !nomExpediteur) {
     return res.status(400).send(page("Erreur", `<h1>Requête invalide</h1><a href="/compte/nouvelle-demande">← Recommencer</a>`));
   }
   if (cguTransaction !== "oui") {
@@ -2219,6 +2238,9 @@ app.post("/compte/finaliser-commande", exigerConnexion, exigerEmailVerifie, exig
     total,
     moyenPaiement,
     numeroExpediteur,
+    nomExpediteur,
+    nomCompteAlipay: nomCompteAlipay || null,
+    telephoneCompteAlipay: telephoneCompteAlipay || null,
     imagePaiement: null,
     fichePDF: null,
     raisonAnnulation: null,
@@ -2274,6 +2296,7 @@ app.get("/compte/transactions/:reference", exigerConnexion, exigerEmailVerifie, 
       <h1>Transfert vers Alipay</h1>
       <div class="carte">
         <div class="banniere banniere-attente">Paiement reçu et en cours de traitement. Vous recevrez une notification dès que la transaction sera complétée.</div>
+        <p class="souligne" style="margin:-6px 0 14px;">⏱️ Délai habituel : 5 minutes à 2 heures. Peut exceptionnellement aller jusqu'à 24h en cas de forte affluence ou d'indisponibilité du réseau.</p>
         <div class="ligne"><span>Montant envoyé</span><b>${t.total.toLocaleString("fr-FR")} XOF</b></div>
         <div class="ligne"><span>Montant à recevoir</span><b>¥ ${t.montantRMB}</b></div>
         <div class="ligne"><span>Référence</span><b>${t.reference}</b></div>
@@ -2812,7 +2835,7 @@ app.get("/admin/transactions", exigerAdmin, (req, res) => {
     } else if (t.statut === "annule") {
       actions = `<span style="font-size:12px; color:var(--texte-att);">${t.raisonAnnulation || "—"}</span>`;
     }
-    return `<tr><td>${imgAlipay}</td><td>${t.reference}</td><td>${t.identifiantUtilisateur}</td><td>${t.total.toLocaleString("fr-FR")} XOF</td><td>${t.montantRMB} RMB</td><td>${t.numeroExpediteur || "—"}</td><td>${imgPreuve}</td><td>${heurePreuve}</td><td>${CONFIG.PAIEMENT[t.moyenPaiement]?.nom || "—"}</td><td>${t.statut}</td><td>${fiche}</td><td>${actions}</td></tr>`;
+    return `<tr><td>${imgAlipay}</td><td>${t.reference}</td><td>${t.identifiantUtilisateur}</td><td>${t.total.toLocaleString("fr-FR")} XOF</td><td>${t.montantRMB} RMB</td><td>${t.nomCompteAlipay || "—"}<br><small>${t.telephoneCompteAlipay || ""}</small></td><td>${t.nomExpediteur || "—"}<br><small>${t.numeroExpediteur || "—"}</small></td><td>${imgPreuve}</td><td>${heurePreuve}</td><td>${CONFIG.PAIEMENT[t.moyenPaiement]?.nom || "—"}</td><td>${t.statut}</td><td>${fiche}</td><td>${actions}</td></tr>`;
   }).join("");
 
   const totalRMB = listeFiltree.reduce((s, t) => s + t.montantRMB, 0);
@@ -2834,7 +2857,7 @@ app.get("/admin/transactions", exigerAdmin, (req, res) => {
       ${filtreLien("effectue", "Terminées")}
       ${filtreLien("annule", "Annulées")}
     </div>
-    ${listeFiltree.length === 0 ? `<p class="aucune-donnee">Aucune transaction.</p>` : `<table class="admin"><thead><tr><th>QR Alipay</th><th>Réf</th><th>Client</th><th>Total</th><th>RMB</th><th>N° dépôt</th><th>Preuve</th><th>Heure</th><th>Moyen</th><th>Statut</th><th>Fiche</th><th>Action</th></tr></thead><tbody>${lignes}</tbody></table>`}
+    ${listeFiltree.length === 0 ? `<p class="aucune-donnee">Aucune transaction.</p>` : `<table class="admin"><thead><tr><th>QR Alipay</th><th>Réf</th><th>Client</th><th>Total</th><th>RMB</th><th>Compte Alipay</th><th>Titulaire / N° dépôt</th><th>Preuve</th><th>Heure</th><th>Moyen</th><th>Statut</th><th>Fiche</th><th>Action</th></tr></thead><tbody>${lignes}</tbody></table>`}
     <p class="souligne" style="margin-top:10px;"><b>Total :</b> ${totalRMB.toLocaleString("fr-FR")} RMB — ${totalXOF.toLocaleString("fr-FR")} XOF</p>
     <p class="souligne" style="margin-top:16px;">Export : <a href="/admin/transactions.json">/admin/transactions.json</a></p>
   `;
