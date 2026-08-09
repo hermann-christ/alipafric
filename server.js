@@ -35,6 +35,19 @@ process.on("uncaughtException", (erreur) => {
 // 2. Servir le dossier public
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Blocage technique des robots IA connus (en plus de robots.txt, qui n'est
+// qu'une consigne que certains robots ignorent). Détection par User-Agent —
+// pas infaillible contre un robot qui se fait passer pour un navigateur,
+// mais bloque la grande majorité des robots IA "honnêtes".
+const ROBOTS_IA_BLOQUES = /GPTBot|ChatGPT-User|CCBot|ClaudeBot|Claude-Web|anthropic-ai|Google-Extended|Bytespider|PerplexityBot|Applebot-Extended|Diffbot|Amazonbot|cohere-ai|Meta-ExternalAgent|FacebookBot|Omgilibot/i;
+app.use((req, res, next) => {
+  const userAgent = req.headers["user-agent"] || "";
+  if (ROBOTS_IA_BLOQUES.test(userAgent)) {
+    return res.status(403).type("text/plain").send("Accès refusé aux robots d'indexation IA.");
+  }
+  next();
+});
+
 // Google (et les navigateurs) vérifient systématiquement /favicon.ico par
 // convention, en plus du <link rel="icon"> dans le head. Sans cette route,
 // Google peut afficher une icône générique au lieu de notre logo.
@@ -104,11 +117,11 @@ const CONFIG = {
   // Grille tarifaire par palier : plus le client commande, plus le taux est
   // avantageux. "seuilMax" = montant RMB maximum pour bénéficier de ce taux.
   PALIERS_TAUX: [
-    { seuilMax: 99.99, taux: 98 },
     { seuilMax: 999.99, taux: 96 },
     { seuilMax: Infinity, taux: 94 },
   ],
-  MONTANT_MIN_RMB: 50,
+  MONTANT_MIN_RMB: 100,
+  MONTANT_MAX_RMB: 20000,
   FRAIS_POURCENT: 0, // Frais de service désactivés
   PORT: process.env.PORT || 3000,
 
@@ -926,6 +939,7 @@ ${indexable ? `
   .pied-social { display: flex; justify-content: center; gap: 18px; margin: 24px 0 4px; }
   .pied-social a { color: var(--texte-att); font-size: 12.5px; font-weight: 700; text-decoration: none; display: flex; align-items: center; gap: 5px; }
   .pied-social a:hover { color: var(--texte); }
+  .whatsapp-flottant { position:fixed; bottom:18px; left:18px; z-index:999; width:52px; height:52px; border-radius:50%; background:#25D366; display:flex; align-items:center; justify-content:center; font-size:26px; text-decoration:none; box-shadow:0 6px 18px rgba(0,0,0,0.45); }
 </style>
 </head>
 <body>
@@ -939,6 +953,7 @@ ${indexable ? `
     </div>
     `}
   </div>
+  ${estAdmin ? "" : `<a href="https://wa.me/${CONFIG.CONTACT_WHATSAPP}" target="_blank" rel="noopener" class="whatsapp-flottant" title="Discuter sur WhatsApp">💬</a>`}
   <button id="btnInstallerApp" class="bouton jaune" style="display:none; position:fixed; bottom:18px; right:18px; left:auto; width:auto; margin:0; padding:12px 18px; z-index:999; box-shadow:0 6px 18px rgba(0,0,0,0.45); border-radius:999px;">📲 Installer l'application</button>
   <script>
     function copierTexte(id) {
@@ -1054,18 +1069,30 @@ function enTeteEtHero() {
         <a class="bouton fantome" href="/connexion#formulaire">Se connecter</a>
       </div>
     </section>
-
-    <div class="taux-boite">
-      <span>Le Yuan à partir de</span>
-      <b>96 F CFA</b>
-      <span style="display:block; margin-top:6px; text-transform:none; letter-spacing:0; font-size:14.5px; font-weight:700; color:var(--jaune);">Plus vous achetez, plus le taux baisse !</span>
-    </div>
   `;
 }
 
 app.get("/robots.txt", (req, res) => {
   res.type("text/plain").send(
-    `User-agent: *\nAllow: /$\nAllow: /inscription$\nAllow: /connexion$\nAllow: /blog/\nDisallow: /compte\nDisallow: /admin\nDisallow: /confirmer-email\nDisallow: /mot-de-passe-oublie\nDisallow: /reinitialiser-mot-de-passe\n\nSitemap: ${CONFIG.URL_SITE}/sitemap.xml\n`
+    `User-agent: *\nAllow: /$\nAllow: /inscription$\nAllow: /connexion$\nAllow: /blog/\nDisallow: /compte\nDisallow: /admin\nDisallow: /confirmer-email\nDisallow: /mot-de-passe-oublie\nDisallow: /reinitialiser-mot-de-passe\n\n` +
+    // Robots d'entraînement IA connus — bloqués sur tout le site.
+    `User-agent: GPTBot\nDisallow: /\n\n` +
+    `User-agent: ChatGPT-User\nDisallow: /\n\n` +
+    `User-agent: CCBot\nDisallow: /\n\n` +
+    `User-agent: ClaudeBot\nDisallow: /\n\n` +
+    `User-agent: Claude-Web\nDisallow: /\n\n` +
+    `User-agent: anthropic-ai\nDisallow: /\n\n` +
+    `User-agent: Google-Extended\nDisallow: /\n\n` +
+    `User-agent: Bytespider\nDisallow: /\n\n` +
+    `User-agent: PerplexityBot\nDisallow: /\n\n` +
+    `User-agent: Applebot-Extended\nDisallow: /\n\n` +
+    `User-agent: Diffbot\nDisallow: /\n\n` +
+    `User-agent: Amazonbot\nDisallow: /\n\n` +
+    `User-agent: cohere-ai\nDisallow: /\n\n` +
+    `User-agent: Meta-ExternalAgent\nDisallow: /\n\n` +
+    `User-agent: FacebookBot\nDisallow: /\n\n` +
+    `User-agent: Omgilibot\nDisallow: /\n\n` +
+    `Sitemap: ${CONFIG.URL_SITE}/sitemap.xml\n`
   );
 });
 
@@ -1123,8 +1150,90 @@ app.get("/blog/recharger-alipay-depuis-le-togo", (req, res) => {
 app.get("/", (req, res) => {
   if (req.utilisateur) return res.redirect("/compte");
 
+  const montantMinCFA = Math.round(CONFIG.MONTANT_MIN_RMB * CONFIG.PALIERS_TAUX[0].taux * (1 + CONFIG.FRAIS_POURCENT / 100));
+
   const contenu = `
     ${enTeteEtHero()}
+    <div class="carte">
+      <div class="echange-boite">
+        <div class="echange-champ">
+          <label>Vous envoyez</label>
+          <input type="number" id="echangeCFA" min="${montantMinCFA}" step="1" placeholder="${montantMinCFA}" oninput="majDepuisCFA()">
+          <span class="echange-indice" id="echangeMinIndice">Min ${montantMinCFA.toLocaleString("fr-FR")} F CFA</span>
+        </div>
+        <div class="echange-champ">
+          <label>Vous recevez</label>
+          <input type="number" id="echangeRMB" min="${CONFIG.MONTANT_MIN_RMB}" step="0.01" placeholder="${CONFIG.MONTANT_MIN_RMB}" oninput="majDepuisRMB()">
+          <span class="echange-indice">Frais ${CONFIG.FRAIS_POURCENT}% inclus</span>
+        </div>
+      </div>
+      <a class="bouton jaune" style="width:100%; text-align:center; display:block; margin-top:14px;" href="/inscription#formulaire" id="btnContinuerEchange">Continuer l'échange</a>
+      <p class="souligne" style="text-align:center; margin-top:8px;">Créez votre compte pour finaliser votre recharge en toute sécurité.</p>
+    </div>
+    <style>
+      .echange-boite { display:flex; gap:10px; flex-wrap:wrap; }
+      .echange-champ { flex:1; min-width:140px; background:var(--carte-claire); border:1px solid var(--bordure); border-radius:12px; padding:14px; }
+      .echange-champ label { display:block; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--texte-att); margin-bottom:6px; }
+      .echange-champ input { width:100%; border:none; background:transparent; font-size:22px; font-weight:800; color:var(--texte); padding:0; }
+      .echange-champ input:focus { outline:none; }
+      .echange-resultat { font-size:22px; font-weight:800; color:var(--jaune); }
+      .echange-indice { display:block; font-size:11.5px; color:var(--texte-att); margin-top:4px; }
+    </style>
+    <script>
+      const PALIERS_ECHANGE = ${JSON.stringify(CONFIG.PALIERS_TAUX)};
+      const FRAIS_ECHANGE = ${CONFIG.FRAIS_POURCENT};
+      const MONTANT_MIN_CFA_ECHANGE = ${montantMinCFA};
+
+      function tauxPourCFA(cfa) {
+        for (const p of PALIERS_ECHANGE) {
+          const cfaMaxPourPalier = Math.round(p.seuilMax * p.taux * (1 + FRAIS_ECHANGE / 100));
+          if (p.seuilMax && cfa <= cfaMaxPourPalier) return p;
+        }
+        return PALIERS_ECHANGE[PALIERS_ECHANGE.length - 1];
+      }
+      function tauxPourRMB(rmb) {
+        for (const p of PALIERS_ECHANGE) {
+          if (p.seuilMax && rmb <= p.seuilMax) return p;
+        }
+        return PALIERS_ECHANGE[PALIERS_ECHANGE.length - 1];
+      }
+
+      let majEnCours = false;
+
+      function majDepuisCFA() {
+        if (majEnCours) return;
+        majEnCours = true;
+        const champCFA = document.getElementById('echangeCFA');
+        const champRMB = document.getElementById('echangeRMB');
+        const cfa = parseFloat(champCFA.value);
+        if (!cfa || cfa <= 0) { champRMB.value = ''; majEnCours = false; return; }
+        const palier = tauxPourCFA(cfa);
+        const rmb = cfa / (palier.taux * (1 + FRAIS_ECHANGE / 100));
+        champRMB.value = rmb.toFixed(2);
+        majEnCours = false;
+      }
+
+      function majDepuisRMB() {
+        if (majEnCours) return;
+        majEnCours = true;
+        const champCFA = document.getElementById('echangeCFA');
+        const champRMB = document.getElementById('echangeRMB');
+        const rmb = parseFloat(champRMB.value);
+        if (!rmb || rmb <= 0) { champCFA.value = ''; majEnCours = false; return; }
+        const palier = tauxPourRMB(rmb);
+        const cfa = Math.round(rmb * palier.taux * (1 + FRAIS_ECHANGE / 100));
+        champCFA.value = cfa;
+        majEnCours = false;
+      }
+
+      document.getElementById('btnContinuerEchange').addEventListener('click', (e) => {
+        const cfa = parseFloat(document.getElementById('echangeCFA').value);
+        if (cfa && cfa > 0) {
+          e.preventDefault();
+          window.location.href = '/inscription?montantCFA=' + Math.round(cfa) + '#formulaire';
+        }
+      });
+    </script>
     <div class="carte">
       <h2>Comment ça marche</h2>
       <div class="etape-carte"><div class="etape-numero">1</div><div class="etape-texte"><b>Créez votre compte</b><span>Puis complétez votre profil et votre pièce d'identité.</span></div></div>
@@ -1160,7 +1269,7 @@ function caseAfficherMdp(idsChamps) {
     </label>`;
 }
 
-function pageInscription({ email = "", erreurMdp = null, erreurGlobal = null, erreurCGU = null, cguCochee = false } = {}) {
+function pageInscription({ email = "", nomComplet = "", pseudo = "", erreurMdp = null, erreurGlobal = null, erreurCGU = null, cguCochee = false } = {}) {
   const contenu = `
     ${enTeteEtHero()}
     <h1 id="formulaire">Créer un compte</h1>
@@ -1168,6 +1277,12 @@ function pageInscription({ email = "", erreurMdp = null, erreurGlobal = null, er
     ${erreurGlobal ? `<div class="banniere banniere-erreur">${erreurGlobal}</div>` : ""}
     <div class="carte">
       <form method="POST" action="/inscription">
+        <label for="nomComplet">Nom complet</label>
+        <input type="text" id="nomComplet" name="nomComplet" value="${nomComplet}" required>
+
+        <label for="pseudo">Pseudo</label>
+        <input type="text" id="pseudo" name="pseudo" value="${pseudo}" minlength="3" maxlength="20" required>
+
         <label for="email">Adresse e-mail</label>
         <input type="email" id="email" name="email" value="${email}" required>
 
@@ -1262,34 +1377,45 @@ app.get("/conditions-utilisation", (req, res) => {
 app.get("/inscription", (req, res) => res.send(pageInscription()));
 
 app.post("/inscription", (req, res) => {
-  const { email, motDePasse, confirmation, cgu } = req.body;
-  if (!email || !motDePasse) return res.status(400).send(pageInscription({ email, erreurGlobal: "Merci de remplir tous les champs." }));
-  if (motDePasse !== confirmation) return res.status(400).send(pageInscription({ email, erreurMdp: "Les mots de passe ne correspondent pas." }));
+  const { email, motDePasse, confirmation, cgu, nomComplet, pseudo } = req.body;
+  if (!email || !motDePasse || !nomComplet || !pseudo) {
+    return res.status(400).send(pageInscription({ email, nomComplet, pseudo, erreurGlobal: "Merci de remplir tous les champs." }));
+  }
+  if (motDePasse !== confirmation) return res.status(400).send(pageInscription({ email, nomComplet, pseudo, erreurMdp: "Les mots de passe ne correspondent pas." }));
   if (!motDePasseRobuste(motDePasse)) {
-    return res.status(400).send(pageInscription({ email, erreurMdp: "Au moins 8 caractères, une majuscule, une minuscule et un chiffre." }));
+    return res.status(400).send(pageInscription({ email, nomComplet, pseudo, erreurMdp: "Au moins 8 caractères, une majuscule, une minuscule et un chiffre." }));
   }
   if (cgu !== "oui") {
-    return res.status(400).send(pageInscription({ email, erreurCGU: "Vous devez accepter les conditions d'utilisation pour créer un compte." }));
+    return res.status(400).send(pageInscription({ email, nomComplet, pseudo, erreurCGU: "Vous devez accepter les conditions d'utilisation pour créer un compte." }));
+  }
+  const pseudoPropre = pseudo.trim();
+  if (!/^[a-zA-Z0-9_]{3,20}$/.test(pseudoPropre)) {
+    return res.status(400).send(pageInscription({ email, nomComplet, pseudo, cguCochee: true, erreurGlobal: "Le pseudo doit contenir entre 3 et 20 caractères (lettres, chiffres, underscore uniquement)." }));
+  }
+  if (utilisateurs.some((u) => (u.pseudo || "").toLowerCase() === pseudoPropre.toLowerCase())) {
+    return res.status(400).send(pageInscription({ email, nomComplet, pseudo, cguCochee: true, erreurGlobal: "Ce pseudo est déjà pris, choisissez-en un autre." }));
   }
   const compteExistant = utilisateurs.find((u) => u.identifiant.toLowerCase() === email.toLowerCase());
   if (compteExistant && !compteExistant.compteSupprime) {
-    return res.status(400).send(pageInscription({ email, cguCochee: true, erreurGlobal: "Ce compte existe déjà. Essayez de vous connecter plutôt." }));
+    return res.status(400).send(pageInscription({ email, nomComplet, pseudo, cguCochee: true, erreurGlobal: "Ce compte existe déjà. Essayez de vous connecter plutôt." }));
   }
   if (compteExistant && compteExistant.compteSupprime) {
-    return res.status(400).send(pageInscription({ email, cguCochee: true, erreurGlobal: `Un ancien compte a existé avec cette adresse e-mail. Contactez le support pour le réactiver, ou utilisez une autre adresse e-mail.<a class="bouton jaune petit" style="margin-top:10px;" href="mailto:${CONFIG.CONTACT_EMAIL}?subject=${encodeURIComponent("Réactivation de mon compte " + CONFIG.NOM_SITE)}&body=${encodeURIComponent("Bonjour,\n\nJe souhaite réactiver mon compte " + CONFIG.NOM_SITE + " associé à l'adresse : " + email + "\n\nMerci.")}">Contacter le support par e-mail</a>` }));
+    return res.status(400).send(pageInscription({ email, nomComplet, pseudo, cguCochee: true, erreurGlobal: `Un ancien compte a existé avec cette adresse e-mail. Contactez le support pour le réactiver, ou utilisez une autre adresse e-mail.<a class="bouton jaune petit" style="margin-top:10px;" href="mailto:${CONFIG.CONTACT_EMAIL}?subject=${encodeURIComponent("Réactivation de mon compte " + CONFIG.NOM_SITE)}&body=${encodeURIComponent("Bonjour,\n\nJe souhaite réactiver mon compte " + CONFIG.NOM_SITE + " associé à l'adresse : " + email + "\n\nMerci.")}">Contacter le support par e-mail</a>` }));
   }
 
+  const nomCompletPropre = nomComplet.trim().replace(/\s+/g, " ");
+  const [prenomInitial, ...resteNom] = nomCompletPropre.split(" ");
   const { sel, hash } = hacherMotDePasse(motDePasse);
   const utilisateur = {
     id: crypto.randomUUID(),
     identifiant: email,
     motDePasseSel: sel,
     motDePasseHash: hash,
-    pseudo: genererPseudo(),
+    pseudo: pseudoPropre,
     emailVerifie: false,
     codeEmail: genererCode(),
-    nom: null,
-    prenom: null,
+    nom: resteNom.join(" ") || prenomInitial,
+    prenom: prenomInitial,
     telephone: null,
     pieceIdentite: null,
     statutVerification: "profil_incomplet",
@@ -1581,10 +1707,10 @@ app.get("/compte", exigerConnexion, exigerEmailVerifie, (req, res) => {
     ` : ""}
     <div class="taux-boite">
       <span>Le Yuan à partir de</span>
-      <b>96 F CFA</b>
+      <b>${CONFIG.PALIERS_TAUX[0].taux} F CFA</b>
       <span style="display:block; margin-top:6px; text-transform:none; letter-spacing:0; font-size:14.5px; font-weight:700; color:var(--jaune);">Plus vous achetez, plus le taux baisse !</span>
     </div>
-    ${u.statutVerification === "verifie" ? `<a class="bouton jaune" href="/compte/nouvelle-demande">Recharger mon Alipay</a>` : ""}
+    ${u.statutVerification === "verifie" || u.statutVerification === "en_attente" ? `<a class="bouton jaune" href="/compte/nouvelle-demande">Recharger mon Alipay</a>${u.statutVerification === "en_attente" ? `<p class="souligne" style="margin-top:6px;">Limité à ${PLAFOND_NON_VERIFIE_XOF.toLocaleString("fr-FR")} F CFA cumulés tant que votre identité n'est pas vérifiée.</p>` : ""}` : ""}
     <div class="carte" style="margin-top:18px;">
       <h2>Dernières activités</h2>
       ${mesTransactions.length === 0 ? `<p class="aucune-donnee">Aucune activité pour le moment.</p>` : activites}
@@ -1768,16 +1894,36 @@ app.post("/compte/supprimer-compte", exigerConnexion, (req, res) => {
 // ============================================================================
 // 10) NOUVELLE DEMANDE DE RECHARGE (3 étapes)
 // ============================================================================
-function exigerVerifie(req, res, next) {
+// KYC assoupli : un profil "en_attente" (identité soumise mais pas encore
+// validée par l'admin) peut recharger jusqu'à un plafond cumulé, sans
+// attendre la validation. Au-delà, ou pour "profil_incomplet"/"refuse",
+// la vérification complète redevient obligatoire.
+const PLAFOND_NON_VERIFIE_XOF = 150000;
+
+function calculerTotalXOF(montantRMB) {
+  const tauxApplique = tauxPourMontant(montantRMB);
+  const montantCFA = Math.round(montantRMB * tauxApplique);
+  const frais = Math.round((montantCFA * CONFIG.FRAIS_POURCENT) / 100);
+  return { tauxApplique, montantCFA, frais, total: montantCFA + frais };
+}
+function totalDejaRechargeXOF(utilisateurId) {
+  return transactions
+    .filter((t) => t.utilisateurId === utilisateurId && t.statut !== "annule")
+    .reduce((s, t) => s + t.total, 0);
+}
+function exigerProfilComplet(req, res, next) {
   if (!req.utilisateur) return res.redirect("/connexion");
-  if (req.utilisateur.statutVerification !== "verifie") return res.redirect("/compte");
+  if (req.utilisateur.statutVerification === "profil_incomplet" || req.utilisateur.statutVerification === "refuse") {
+    return res.redirect("/compte");
+  }
   next();
 }
 const ETAPES = ["Montant & QR", "Moyen de paiement", "Confirmation"];
 
-app.get("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerVerifie, (req, res) => {
+app.get("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerProfilComplet, (req, res) => {
   const montantPrecedent = req.query.montantRMB || "";
   const imagePrecedente = req.query.alipayImage || "";
+  const indicatifOptions = PAYS.map((p) => `<option value="${p.indicatif}" data-chiffres="${p.chiffres}">${p.nom} (${p.indicatif})</option>`).join("");
   const contenu = `
     ${entete("accueil", req.utilisateur)}
     ${stepper(1, ETAPES)}
@@ -1785,8 +1931,18 @@ app.get("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerV
     <p class="souligne">Minimum : ${CONFIG.MONTANT_MIN_RMB} RMB</p>
     <div class="carte">
       <form method="POST" action="/compte/nouvelle-demande" enctype="multipart/form-data">
+        ${!req.utilisateur.telephone ? `
+        <label id="labelTelephone">Numéro de téléphone (pour déterminer vos moyens de paiement)</label>
+        <div style="display:flex; gap:8px;">
+          <select name="indicatif" id="selectPays" required onchange="majFormatTelephone()">
+            <option value="" selected disabled>Sélectionnez un pays</option>
+            ${indicatifOptions}
+          </select>
+          <input type="text" id="champTelephone" name="numeroTelephone" placeholder="Sélectionnez d'abord un pays" inputmode="numeric" oninput="this.value=this.value.replace(/\\D/g,'').slice(0,this.maxLength||20)" required disabled>
+        </div>
+        ` : ""}
         <label for="montantRMB">Montant à recevoir sur Alipay (RMB)</label>
-        <input type="number" id="montantRMB" name="montantRMB" min="${CONFIG.MONTANT_MIN_RMB}" step="0.01" required oninput="majApercu()" value="${montantPrecedent}">
+        <input type="number" id="montantRMB" name="montantRMB" min="${CONFIG.MONTANT_MIN_RMB}" max="${CONFIG.MONTANT_MAX_RMB}" step="0.01" required oninput="majApercu()" value="${montantPrecedent}">
         <p class="souligne" id="apercuMontant" style="margin:6px 0 0;">Indiquez un montant pour voir le taux et le total.</p>
         <p id="astuceMontant" style="display:none; background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.3); color: #FBBF6B; border-radius: 8px; padding: 8px 12px; font-size: 12.5px; margin: 8px 0 0;"></p>
 
@@ -1802,6 +1958,19 @@ app.get("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerV
       </form>
     </div>
     <script>
+      function majFormatTelephone() {
+        const select = document.getElementById('selectPays');
+        const champ = document.getElementById('champTelephone');
+        if (!select || !champ) return;
+        const option = select.options[select.selectedIndex];
+        const chiffres = parseInt(option.getAttribute('data-chiffres'), 10);
+        if (!chiffres) return;
+        champ.disabled = false;
+        champ.maxLength = chiffres;
+        champ.setAttribute('pattern', '[0-9]{' + chiffres + '}');
+        champ.placeholder = chiffres + ' chiffres, ex : ' + '9'.repeat(chiffres);
+        champ.value = champ.value.replace(/\\D/g, '').slice(0, chiffres);
+      }
       const PALIERS = ${JSON.stringify(CONFIG.PALIERS_TAUX)};
       const FRAIS_POURCENT = ${CONFIG.FRAIS_POURCENT};
 
@@ -1915,18 +2084,28 @@ function pageMoyenPaiement(req, montant, referenceImage, moyenPrecedent = "", nu
   `;
 }
 
-app.get("/compte/nouvelle-demande/paiement", exigerConnexion, exigerEmailVerifie, exigerVerifie, (req, res) => {
+app.get("/compte/nouvelle-demande/paiement", exigerConnexion, exigerEmailVerifie, exigerProfilComplet, (req, res) => {
   const montant = parseFloat(req.query.montantRMB);
   const referenceImage = req.query.alipayImage;
   if (!montant || !referenceImage) return res.redirect("/compte/nouvelle-demande");
   res.send(page("Moyen de paiement", pageMoyenPaiement(req, montant, referenceImage, req.query.moyenPaiement || "", req.query.numeroExpediteur || "")));
 });
-app.post("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerVerifie, uploadAlipay.single("alipayImage"), async (req, res) => {
+app.post("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exigerProfilComplet, uploadAlipay.single("alipayImage"), async (req, res) => {
   const montant = parseFloat(req.body.montantRMB);
   const image = req.file;
   const imagePrecedente = req.body.alipayImagePrecedente || "";
   if (!montant || montant < CONFIG.MONTANT_MIN_RMB || (!image && !imagePrecedente)) {
     return res.status(400).send(page("Erreur", `<h1>Montant invalide</h1><p class="souligne">Le minimum est de ${CONFIG.MONTANT_MIN_RMB} RMB et une image est requise.</p><a href="/compte/nouvelle-demande">← Retour</a>`));
+  }
+  if (montant > CONFIG.MONTANT_MAX_RMB) {
+    return res.status(400).send(page("Erreur", `<h1>Montant trop élevé</h1><p class="souligne">Le maximum autorisé par transaction est de ${CONFIG.MONTANT_MAX_RMB.toLocaleString("fr-FR")} RMB. Pour un montant supérieur, contactez-nous directement sur WhatsApp.</p><a class="bouton jaune" href="https://wa.me/${CONFIG.CONTACT_WHATSAPP}" target="_blank">Discuter sur WhatsApp</a><a class="bouton fantome" href="/compte/nouvelle-demande">← Retour</a>`));
+  }
+  if (req.utilisateur.statutVerification !== "verifie") {
+    const { total } = calculerTotalXOF(montant);
+    const dejaRecharge = totalDejaRechargeXOF(req.utilisateur.id);
+    if (dejaRecharge + total > PLAFOND_NON_VERIFIE_XOF) {
+      return res.status(400).send(page("Erreur", `<h1>Vérification d'identité requise</h1><p class="souligne">Vous avez atteint le plafond de ${PLAFOND_NON_VERIFIE_XOF.toLocaleString("fr-FR")} F CFA cumulés autorisé sans vérification d'identité. Faites vérifier votre profil pour continuer à recharger sans limite.</p><a class="bouton jaune" href="/compte/profil">Vérifier mon identité</a></p><a class="bouton fantome" href="/compte/nouvelle-demande">← Retour</a>`));
+    }
   }
   let referenceImage = imagePrecedente;
   if (image) {
@@ -1943,7 +2122,7 @@ app.post("/compte/nouvelle-demande", exigerConnexion, exigerEmailVerifie, exiger
 
 // Étape 3 : simple récapitulatif — RIEN n'est encore enregistré. Le clic sur
 // "J'ai payé" (voir plus bas) est ce qui crée réellement la transaction.
-app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exigerVerifie, (req, res) => {
+app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exigerProfilComplet, (req, res) => {
   const { montantRMB, alipayImage, moyenPaiement, numeroExpediteur } = req.body;
   const montant = parseFloat(montantRMB);
   const info = CONFIG.PAIEMENT[moyenPaiement];
@@ -2007,7 +2186,7 @@ app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exiger
 
 // C'est cette étape qui crée réellement la transaction. Si le client
 // abandonne avant, rien n'est enregistré : il repart de zéro.
-app.post("/compte/finaliser-commande", exigerConnexion, exigerEmailVerifie, exigerVerifie, (req, res) => {
+app.post("/compte/finaliser-commande", exigerConnexion, exigerEmailVerifie, exigerProfilComplet, (req, res) => {
   const { montantRMB, alipayImage, moyenPaiement, numeroExpediteur, cguTransaction } = req.body;
   const montant = parseFloat(montantRMB);
   if (!montant || !alipayImage || !CONFIG.PAIEMENT[moyenPaiement] || !numeroExpediteur) {
@@ -2016,11 +2195,14 @@ app.post("/compte/finaliser-commande", exigerConnexion, exigerEmailVerifie, exig
   if (cguTransaction !== "oui") {
     return res.status(400).send(page("Erreur", `<h1>Acceptation des CGU/CGV requise</h1><p class="souligne">Vous devez cocher la case d'acceptation des Conditions Générales d'Utilisation et de Vente pour valider votre paiement.</p><a href="/compte/nouvelle-demande">← Recommencer</a>`));
   }
+  if (montant > CONFIG.MONTANT_MAX_RMB) {
+    return res.status(400).send(page("Erreur", `<h1>Montant trop élevé</h1><p class="souligne">Le maximum autorisé par transaction est de ${CONFIG.MONTANT_MAX_RMB.toLocaleString("fr-FR")} RMB. Pour un montant supérieur, contactez-nous directement sur WhatsApp.</p><a class="bouton jaune" href="https://wa.me/${CONFIG.CONTACT_WHATSAPP}" target="_blank">Discuter sur WhatsApp</a><a class="bouton fantome" href="/compte/nouvelle-demande">← Retour</a>`));
+  }
 
-  const tauxApplique = tauxPourMontant(montant);
-  const montantCFA = Math.round(montant * tauxApplique);
-  const frais = Math.round((montantCFA * CONFIG.FRAIS_POURCENT) / 100);
-  const total = montantCFA + frais;
+  const { tauxApplique, montantCFA, frais, total } = calculerTotalXOF(montant);
+  if (req.utilisateur.statutVerification !== "verifie" && totalDejaRechargeXOF(req.utilisateur.id) + total > PLAFOND_NON_VERIFIE_XOF) {
+    return res.status(400).send(page("Erreur", `<h1>Vérification d'identité requise</h1><p class="souligne">Vous avez atteint le plafond de ${PLAFOND_NON_VERIFIE_XOF.toLocaleString("fr-FR")} F CFA cumulés autorisé sans vérification d'identité.</p><a class="bouton jaune" href="/compte/profil">Vérifier mon identité</a></p><a class="bouton fantome" href="/compte/nouvelle-demande">← Retour</a>`));
+  }
   const reference = genererReference();
 
   const transaction = {
