@@ -21,6 +21,29 @@ const webpush = require("web-push");
 
 // 1. Déclarer l'application Express UNE SEULE FOIS
 const app = express();
+app.disable("x-powered-by");
+
+// En-têtes de sécurité (équivalent manuel à Helmet.js, sans dépendance
+// supplémentaire à installer). Le CSP autorise 'unsafe-inline' pour les
+// scripts/styles car toute l'app utilise des <script>/<style> inline —
+// une politique plus stricte casserait le site entier.
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader(
+    "Content-Security-Policy",
+    "default-src 'self'; " +
+    "script-src 'self' 'unsafe-inline'; " +
+    "style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data: https://res.cloudinary.com; " +
+    "connect-src 'self'; " +
+    "frame-ancestors 'none'; " +
+    "base-uri 'self'; " +
+    "form-action 'self'"
+  );
+  next();
+});
 
 // Filet de sécurité : une erreur oubliée quelque part ne doit jamais faire
 // planter tout le serveur (les versions récentes de Node.js arrêtent le
@@ -70,7 +93,7 @@ app.get('/ping', (req, res) => {
 async function envoyerEmailBienvenue(email, pseudo) {
   const sujet = `Bienvenue sur ${CONFIG.NOM_SITE} !`;
   const contenuHtml = `
-    <h2>Bienvenue ${pseudo} !</h2>
+    <h2>Bienvenue ${echapperHTML(pseudo)} !</h2>
     <p>Votre compte a été créé avec succès sur <b>${CONFIG.NOM_SITE}</b>.</p>
     <p>Vous pouvez dès à présent effectuer vos demandes de recharge Alipay en toute sécurité.</p>
   `;
@@ -104,6 +127,13 @@ async function envoyerEmailTransaction(email, sujet, message) {
 // ----------------------------------------------------------------------------
 // 1) CONFIGURATION
 // ----------------------------------------------------------------------------
+// Le flag "Secure" des cookies n'est activé qu'en production (HTTPS, Render
+// définit NODE_ENV=production automatiquement). En local (http://localhost
+// ou testé depuis un téléphone via IP locale en http), on le désactive :
+// sinon le navigateur refuserait purement et simplement d'enregistrer le
+// cookie hors HTTPS, ce qui casserait la connexion en développement.
+const DRAPEAU_SECURE = process.env.NODE_ENV === "production" ? "; Secure" : "";
+
 const CONFIG = {
   NOM_SITE: "AlipAfric",
   TAGLINE: "RECHARGE. SIMPLIFIÉ.",
@@ -139,8 +169,8 @@ const CONFIG = {
   PAIEMENT: {
     mixx: { nom: "Mixx By Yas Togo", numero: "+228 92908235", logo: "mixx.png", noteFrais: true, typeSaisie: "telephone", togoUniquement: true },
     moov: { nom: "Moov Money Togo", numero: "+228 99248336", logo: "moov.png", noteFrais: true, typeSaisie: "telephone", togoUniquement: true },
-    ecobank: { nom: "Ecobank Togo", numero: "141734798001", logo: "ecobank.jpg", noteFrais: false, typeSaisie: "nom", togoUniquement: false },
-    pispi: { nom: "PI-SPI", numero: "+22892908235", logo: "pi.jpg", noteFrais: false, typeSaisie: "nom", togoUniquement: false },
+    ecobank: { nom: "Ecobank Togo", numero: "141734798001", logo: "ecobank.jpg", noteFrais: false, typeSaisie: "compte", togoUniquement: false },
+    pispi: { nom: "PI-SPI", numero: "+22892908235", logo: "pi.jpg", noteFrais: false, typeSaisie: "alias", togoUniquement: false },
   },
 };
 
@@ -406,8 +436,21 @@ function genererPseudo() {
 function genererCode() {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
+// Échappe les caractères HTML dangereux dans toute donnée saisie par un
+// utilisateur avant de l'insérer dans une page (protection XSS). À utiliser
+// systématiquement autour de tout ${...} dont la valeur vient d'un
+// formulaire (nom, prénom, pseudo, email, numéro, alias, raison...).
+function echapperHTML(valeur) {
+  if (valeur === null || valeur === undefined) return "";
+  return String(valeur)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 function nomAffichage(u) {
-  return u.statutVerification === "verifie" && u.prenom ? u.prenom : u.pseudo;
+  return echapperHTML(u.statutVerification === "verifie" && u.prenom ? u.prenom : u.pseudo);
 }
 
 // ----------------------------------------------------------------------------
@@ -498,6 +541,98 @@ async function axiosAvecRetry(config, tentatives = 3, delaiMs = 1000) {
   }
 }
 
+async function axiosAvecRetry(config, tentatives = 3, delaiMs = 1000) {
+  for (let essai = 1; essai <= tentatives; essai++) {
+    try {
+      return await axios(config);
+    } catch (erreur) {
+      const statut = erreur.response?.status;
+      const dernierEssai = essai === tentatives;
+      const erreurReessayable = !statut || statut >= 500;
+      if (dernierEssai || !erreurReessayable) throw erreur;
+      console.warn(`⚠️  Appel réseau échoué (essai ${essai}/${tentatives}), nouvel essai dans ${delaiMs}ms :`, erreur.message);
+      await new Promise((r) => setTimeout(r, delaiMs));
+      delaiMs *= 2;
+    }
+  }
+}
+
+// --- Assistant IA de support (widget de chat) -------------------------------
+const ANTHROPIC_ACTIF = !!process.env.ANTHROPIC_API_KEY;
+if (!ANTHROPIC_ACTIF) {
+  console.warn("⚠️  ANTHROPIC_API_KEY non défini : l'assistant IA de support est désactivé. Voir .env.");
+}
+
+function promptSystemeAssistant() {
+  const paliers = CONFIG.PALIERS_TAUX.map((p) => `jusqu'à ${p.seuilMax === Infinity ? "et plus" : p.seuilMax + " RMB"} : ${p.taux} F CFA/Yuan`).join(" ; ");
+  return `Tu es l'assistant de support de ${CONFIG.NOM_SITE}, un service togolais qui permet de recharger un compte Alipay en RMB (Yuans) depuis le Togo et l'Afrique de l'Ouest/centrale, en payant en F CFA.
+
+INFOS FACTUELLES SUR LE SERVICE :
+- Minimum par recharge : ${CONFIG.MONTANT_MIN_RMB} RMB. Maximum par transaction : ${CONFIG.MONTANT_MAX_RMB} RMB (au-delà, contacter WhatsApp).
+- Grille tarifaire actuelle : ${paliers}.
+- Processus en 3 étapes : (1) indiquer le montant et envoyer le QR code Alipay + nom/téléphone du compte Alipay, (2) choisir le moyen de paiement et indiquer le nom/numéro du compte utilisé pour payer, (3) payer et confirmer.
+- Une pièce d'identité est requise avant de pouvoir recharger (le compte doit être "en attente" au minimum). Sans vérification complète par un administrateur, un plafond de ${PLAFOND_NON_VERIFIE_XOF.toLocaleString("fr-FR")} F CFA cumulés s'applique.
+- Le compte Alipay du client doit être vérifié par Alipay lui-même, sinon Alipay peut bloquer les fonds reçus — ${CONFIG.NOM_SITE} ne peut pas intervenir sur les décisions internes d'Alipay.
+- Délai habituel de traitement : 5 minutes à 2 heures après paiement, jusqu'à 24h en cas de forte affluence.
+- Moyens de paiement disponibles selon le pays du client (Mixx By Yas et Moov Money réservés au Togo ; Ecobank et PI-SPI disponibles plus largement ; en zone Afrique centrale (Cameroun, Gabon, Congo, Tchad, RCA, Guinée équatoriale), seul Ecobank est disponible).
+- Contact humain : WhatsApp ${CONFIG.CONTACT_WHATSAPP}.
+
+RÈGLES STRICTES :
+- Réponds en français, de façon brève, chaleureuse et directe.
+- Tu n'as accès à AUCUNE donnée de compte ou de transaction réelle. Ne dis JAMAIS le statut d'une transaction précise, un solde, ou des informations personnelles — tu ne les connais pas. Si le client demande où en est SA transaction ou un problème sur SON compte, redirige-le systématiquement vers le support WhatsApp (${CONFIG.CONTACT_WHATSAPP}) ou vers la page /compte/transactions.
+- N'invente jamais de taux, délai ou information qui ne figure pas ci-dessus.
+- Si tu ne sais pas, dis-le simplement et redirige vers WhatsApp plutôt que d'inventer.
+- Ne donne aucun conseil juridique ou financier définitif ; pour les questions sur les CGU/CGV, renvoie vers /conditions-utilisation.`;
+}
+
+async function interrogerAssistantIA(historique) {
+  const reponse = await axiosAvecRetry({
+    method: "post",
+    url: "https://api.anthropic.com/v1/messages",
+    data: {
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 500,
+      system: promptSystemeAssistant(),
+      messages: historique,
+    },
+    headers: {
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+  }, 2, 800);
+  const bloc = reponse.data.content.find((c) => c.type === "text");
+  return bloc ? bloc.text : "Désolé, je n'ai pas pu générer de réponse. Contactez-nous sur WhatsApp pour de l'aide immédiate.";
+}
+
+// Limiteur simple par IP pour contrôler les coûts (max 20 messages / 10 min).
+const tentativesChat = new Map();
+function limiteChatDepassee(req) {
+  const ip = ipDe(req);
+  const entree = tentativesChat.get(ip);
+  const FENETRE = 10 * 60 * 1000;
+  if (!entree || Date.now() - entree.debut > FENETRE) {
+    tentativesChat.set(ip, { compte: 1, debut: Date.now() });
+    return false;
+  }
+  entree.compte += 1;
+  return entree.compte > 20;
+}
+
+app.post("/api/support-chat", express.json(), async (req, res) => {
+  if (!ANTHROPIC_ACTIF) return res.status(503).json({ erreur: "Assistant indisponible pour le moment. Contactez-nous sur WhatsApp." });
+  if (limiteChatDepassee(req)) return res.status(429).json({ erreur: "Trop de messages envoyés. Merci de patienter quelques minutes, ou contactez-nous sur WhatsApp." });
+  const messages = Array.isArray(req.body.messages) ? req.body.messages.slice(-10) : [];
+  if (messages.length === 0) return res.status(400).json({ erreur: "Message manquant." });
+  try {
+    const texte = await interrogerAssistantIA(messages);
+    res.json({ texte });
+  } catch (erreur) {
+    console.error("Erreur assistant IA :", erreur.response?.data || erreur.message);
+    res.status(500).json({ erreur: "Une erreur est survenue. Contactez-nous sur WhatsApp si le problème persiste." });
+  }
+});
+
 function parseCookies(req) {
   const entete = req.headers.cookie;
   const resultat = {};
@@ -513,7 +648,7 @@ function connecterUtilisateur(res, idUtilisateur) {
   const sessionId = crypto.randomUUID();
   sessions.set(sessionId, { idUtilisateur, expiration: Date.now() + 3600 * 1000, derniereSync: Date.now() });
   sauvegarderSessions();
-  res.setHeader("Set-Cookie", `session=${sessionId}; HttpOnly; Path=/; SameSite=Lax; Max-Age=3600`);
+  res.setHeader("Set-Cookie", `session=${sessionId}; HttpOnly; Path=/; SameSite=Lax; Max-Age=3600${DRAPEAU_SECURE}`);
 }
 function deconnecterUtilisateur(req, res) {
   const cookies = parseCookies(req);
@@ -527,18 +662,18 @@ function deconnecterUtilisateur(req, res) {
       if (abonnementsPushClients.length !== avait) sauvegarderJSON(FICHIER_ABONNEMENTS_PUSH_CLIENTS, abonnementsPushClients);
     }
   }
-  res.setHeader("Set-Cookie", "session=; HttpOnly; Path=/; Max-Age=0");
+  res.setHeader("Set-Cookie", `session=; HttpOnly; Path=/; Max-Age=0${DRAPEAU_SECURE}`);
 }
 function connecterAdmin(res) {
   const sessionId = crypto.randomUUID();
   sessionsAdmin.set(sessionId, { expiration: Date.now() + 604800 * 1000, derniereSync: Date.now() });
   sauvegarderSessionsAdmin();
-  res.setHeader("Set-Cookie", `sessionAdmin=${sessionId}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
+  res.setHeader("Set-Cookie", `sessionAdmin=${sessionId}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800${DRAPEAU_SECURE}`);
 }
 function deconnecterAdmin(req, res) {
   const cookies = parseCookies(req);
   if (cookies.sessionAdmin) { sessionsAdmin.delete(cookies.sessionAdmin); sauvegarderSessionsAdmin(); }
-  res.setHeader("Set-Cookie", "sessionAdmin=; HttpOnly; Path=/; Max-Age=0");
+  res.setHeader("Set-Cookie", `sessionAdmin=; HttpOnly; Path=/; Max-Age=0${DRAPEAU_SECURE}`);
 }
 
 // ----------------------------------------------------------------------------
@@ -558,7 +693,7 @@ app.use((req, res, next) => {
   if (s && s.expiration > Date.now()) {
     req.utilisateur = utilisateurs.find((u) => u.id === s.idUtilisateur) || null;
     s.expiration = Date.now() + 3600 * 1000;
-    res.setHeader("Set-Cookie", `session=${cookies.session}; HttpOnly; Path=/; SameSite=Lax; Max-Age=3600`);
+    res.setHeader("Set-Cookie", `session=${cookies.session}; HttpOnly; Path=/; SameSite=Lax; Max-Age=3600${DRAPEAU_SECURE}`);
     if (Date.now() - s.derniereSync > 5 * 60 * 1000) { s.derniereSync = Date.now(); sauvegarderSessions(); }
   } else {
     if (s) { sessions.delete(cookies.session); sauvegarderSessions(); }
@@ -569,7 +704,7 @@ app.use((req, res, next) => {
   if (sa && sa.expiration > Date.now()) {
     req.estAdmin = true;
     sa.expiration = Date.now() + 604800 * 1000;
-    res.setHeader("Set-Cookie", `sessionAdmin=${cookies.sessionAdmin}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
+    res.setHeader("Set-Cookie", `sessionAdmin=${cookies.sessionAdmin}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800${DRAPEAU_SECURE}`);
     if (Date.now() - sa.derniereSync > 30 * 60 * 1000) { sa.derniereSync = Date.now(); sauvegarderSessionsAdmin(); }
   } else {
     if (sa) { sessionsAdmin.delete(cookies.sessionAdmin); sauvegarderSessionsAdmin(); }
@@ -1278,13 +1413,13 @@ function pageInscription({ email = "", nomComplet = "", pseudo = "", erreurMdp =
     <div class="carte">
       <form method="POST" action="/inscription">
         <label for="nomComplet">Nom complet</label>
-        <input type="text" id="nomComplet" name="nomComplet" value="${nomComplet}" required>
+        <input type="text" id="nomComplet" name="nomComplet" value="${echapperHTML(nomComplet)}" required>
 
         <label for="pseudo">Pseudo</label>
-        <input type="text" id="pseudo" name="pseudo" value="${pseudo}" minlength="3" maxlength="20" required>
+        <input type="text" id="pseudo" name="pseudo" value="${echapperHTML(pseudo)}" minlength="3" maxlength="20" required>
 
         <label for="email">Adresse e-mail</label>
-        <input type="email" id="email" name="email" value="${email}" required>
+        <input type="email" id="email" name="email" value="${echapperHTML(email)}" required>
 
         <label for="motDePasse">Mot de passe</label>
         <input type="password" id="motDePasse" name="motDePasse" minlength="8" required>
@@ -1436,7 +1571,7 @@ app.get("/confirmer-email", exigerConnexion, (req, res) => {
   if (u.emailVerifie) return res.redirect("/compte");
   const contenu = `
     <h1>Confirmez votre e-mail</h1>
-    <p class="souligne">Un code vient de vous être envoyé par e-mail à ${u.identifiant}.</p>
+    <p class="souligne">Un code vient de vous être envoyé par e-mail à ${echapperHTML(u.identifiant)}.</p>
     <div class="carte">
       <form method="POST" action="/confirmer-email">
         <label for="code">Code à 6 chiffres</label>
@@ -1578,13 +1713,13 @@ async function envoyerEmailReinitialisation(destinataire, code) {
 function pageReinitialiserMotDePasse({ email = "", code = "", erreurGlobal = null, erreurMdp = null, codeDemo = null } = {}) {
   const contenu = `
     <h1>Réinitialiser le mot de passe</h1>
-    <p class="souligne">Un code de vérification vient de vous être envoyé par e-mail${email ? ` à ${email}` : ""}.</p>
+    <p class="souligne">Un code de vérification vient de vous être envoyé par e-mail${email ? ` à ${echapperHTML(email)}` : ""}.</p>
     ${codeDemo ? `<div class="banniere banniere-attente">Code de démonstration (pas de service e-mail réel connecté) : <b style="font-size:18px;">${codeDemo}</b></div>` : ""}
     ${erreurGlobal ? `<div class="banniere banniere-erreur">${erreurGlobal}</div>` : ""}
     <div class="carte">
       <form method="POST" action="/reinitialiser-mot-de-passe">
         <label for="email">Adresse e-mail</label>
-        <input type="email" id="email" name="email" value="${email}" required>
+        <input type="email" id="email" name="email" value="${echapperHTML(email)}" required>
 
         <label for="code">Code à 6 chiffres</label>
         <input type="text" id="code" name="code" maxlength="6" value="${code}" required>
@@ -1736,10 +1871,10 @@ app.get("/compte/profil", exigerConnexion, exigerEmailVerifie, (req, res) => {
         ${u.statutVerification === "refuse" ? `<div class="banniere banniere-erreur">${u.raisonRefus || MESSAGE_REFUS_IDENTITE}</div>` : ""}
         <form method="POST" action="/compte/profil" enctype="multipart/form-data">
           <label for="prenom">Prénom (identique à votre pièce d'identité)</label>
-          <input type="text" id="prenom" name="prenom" value="${u.prenom || ""}" required>
+          <input type="text" id="prenom" name="prenom" value="${echapperHTML(u.prenom || "")}" required>
 
           <label for="nom">Nom (identique à votre pièce d'identité)</label>
-          <input type="text" id="nom" name="nom" value="${u.nom || ""}" required>
+          <input type="text" id="nom" name="nom" value="${echapperHTML(u.nom || "")}" required>
 
           <label id="labelTelephone">Numéro de téléphone</label>
           <div style="display:flex; gap:8px;">
@@ -1778,9 +1913,9 @@ app.get("/compte/profil", exigerConnexion, exigerEmailVerifie, (req, res) => {
     blocIdentite = `
       <div class="carte">
         <h2>Informations personnelles <span class="badge ${badgeClasse}">${badgeTexte}</span></h2>
-        <div class="ligne"><span>Prénom</span><b>${u.prenom}</b></div>
-        <div class="ligne"><span>Nom</span><b>${u.nom}</b></div>
-        <div class="ligne"><span>Téléphone</span><b>${u.telephone}</b></div>
+        <div class="ligne"><span>Prénom</span><b>${echapperHTML(u.prenom)}</b></div>
+        <div class="ligne"><span>Nom</span><b>${echapperHTML(u.nom)}</b></div>
+        <div class="ligne"><span>Téléphone</span><b>${echapperHTML(u.telephone)}</b></div>
         <div class="ligne"><span>Pièce d'identité</span><b>${u.statutVerification === "verifie" ? "Vérifiée" : "Envoyée"}</b></div>
       </div>`;
   }
@@ -1791,7 +1926,7 @@ app.get("/compte/profil", exigerConnexion, exigerEmailVerifie, (req, res) => {
     ${blocIdentite}
     <div class="carte">
       <h2>Adresse e-mail</h2>
-      <div class="ligne"><span>E-mail vérifié</span><b>${u.identifiant}</b></div>
+      <div class="ligne"><span>E-mail vérifié</span><b>${echapperHTML(u.identifiant)}</b></div>
       <p class="souligne" style="margin-top:10px;">Pour des raisons de sécurité, l'adresse e-mail d'un compte ne peut pas être modifiée après vérification. Contactez le support si besoin.</p>
     </div>
     <div class="carte">
@@ -2047,8 +2182,8 @@ function pageMoyenPaiement(req, montant, referenceImage, moyenPrecedent = "", nu
       <form method="POST" action="/compte/choisir-paiement">
         <input type="hidden" name="montantRMB" value="${montant}">
         <input type="hidden" name="alipayImage" value="${referenceImage}">
-        <input type="hidden" name="nomCompteAlipay" value="${nomCompteAlipay}">
-        <input type="hidden" name="telephoneCompteAlipay" value="${telephoneCompteAlipay}">
+        <input type="hidden" name="nomCompteAlipay" value="${echapperHTML(nomCompteAlipay)}">
+        <input type="hidden" name="telephoneCompteAlipay" value="${echapperHTML(telephoneCompteAlipay)}">
         ${optionsPaiement}
 
         <label for="nomExpediteur">Nom du titulaire du compte utilisé pour le paiement</label>
@@ -2079,6 +2214,22 @@ function pageMoyenPaiement(req, montant, referenceImage, moyenPrecedent = "", nu
           champ.placeholder = 'ex : 92908235';
           champ.value = champ.value.replace(/\\D/g, '').slice(0, 8);
           champ.oninput = function () { this.value = this.value.replace(/\\D/g, '').slice(0, 8); };
+        } else if (type === 'compte') {
+          label.textContent = 'Numéro de compte Ecobank utilisé pour le dépôt';
+          champ.type = 'text';
+          champ.removeAttribute('pattern');
+          champ.removeAttribute('maxLength');
+          champ.setAttribute('inputmode', 'numeric');
+          champ.placeholder = 'ex : 1417XXXXXXX';
+          champ.oninput = function () { this.value = this.value.replace(/[^0-9]/g, ''); };
+        } else if (type === 'alias') {
+          label.textContent = 'Alias PI-SPI utilisé pour le dépôt';
+          champ.type = 'text';
+          champ.removeAttribute('inputmode');
+          champ.removeAttribute('pattern');
+          champ.removeAttribute('maxLength');
+          champ.placeholder = 'ex : @votre_alias ou +228XXXXXXXX';
+          champ.oninput = null;
         } else {
           label.textContent = 'Nom complet du compte utilisé pour le dépôt';
           champ.type = 'text';
@@ -2152,6 +2303,12 @@ app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exiger
   if (info.typeSaisie === "telephone" && !/^\d{8}$/.test(numeroExpediteur.trim())) {
     return res.status(400).send(page("Erreur", `<h1>Numéro invalide</h1><p class="souligne">Le numéro utilisé pour le dépôt doit contenir exactement 8 chiffres.</p><a href="/compte/nouvelle-demande">← Recommencer</a>`));
   }
+  if (info.typeSaisie === "compte" && !/^\d{5,}$/.test(numeroExpediteur.trim())) {
+    return res.status(400).send(page("Erreur", `<h1>Numéro de compte invalide</h1><p class="souligne">Merci d'indiquer le numéro de compte Ecobank utilisé pour le dépôt.</p><a href="/compte/nouvelle-demande">← Recommencer</a>`));
+  }
+  if (info.typeSaisie === "alias" && numeroExpediteur.trim().length < 2) {
+    return res.status(400).send(page("Erreur", `<h1>Alias invalide</h1><p class="souligne">Merci d'indiquer l'alias PI-SPI utilisé pour le dépôt.</p><a href="/compte/nouvelle-demande">← Recommencer</a>`));
+  }
   if (info.typeSaisie === "nom" && numeroExpediteur.trim().length < 3) {
     return res.status(400).send(page("Erreur", `<h1>Nom invalide</h1><p class="souligne">Merci d'indiquer le nom complet du compte utilisé pour le dépôt.</p><a href="/compte/nouvelle-demande">← Recommencer</a>`));
   }
@@ -2171,8 +2328,8 @@ app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exiger
       <div class="ligne"><span>Le bénéficiaire reçoit</span><b>${montant} RMB</b></div>
       ${frais > 0 ? `<div class="ligne"><span>Frais de service (${CONFIG.FRAIS_POURCENT}%)</span><b>+ ${frais.toLocaleString("fr-FR")} XOF</b></div>` : ""}
       <div class="ligne"><span>Via</span><b>${info.nom}</b></div>
-      <div class="ligne"><span>Titulaire du compte</span><b>${nomExpediteur}</b></div>
-      <div class="ligne"><span>Numéro utilisé pour le dépôt</span><b>${numeroExpediteur}</b></div>
+      <div class="ligne"><span>Titulaire du compte</span><b>${echapperHTML(nomExpediteur)}</b></div>
+      <div class="ligne"><span>Numéro utilisé pour le dépôt</span><b>${echapperHTML(numeroExpediteur)}</b></div>
       <div class="ligne"><span>Total à payer</span><b style="font-size:18px; color:var(--jaune);">${total.toLocaleString("fr-FR")} XOF</b></div>
       <p class="souligne" style="margin:8px 0 0;">⏱️ Une fois payé, la recharge Alipay prend en général entre 5 minutes et 2 heures (jusqu'à 24h en cas de forte affluence).</p>
 
@@ -2187,8 +2344,8 @@ app.post("/compte/choisir-paiement", exigerConnexion, exigerEmailVerifie, exiger
         <input type="hidden" name="montantRMB" value="${montant}">
         <input type="hidden" name="alipayImage" value="${alipayImage}">
         <input type="hidden" name="moyenPaiement" value="${moyenPaiement}">
-        <input type="hidden" name="numeroExpediteur" value="${numeroExpediteur}">
-        <input type="hidden" name="nomExpediteur" value="${nomExpediteur}">
+        <input type="hidden" name="numeroExpediteur" value="${echapperHTML(numeroExpediteur)}">
+        <input type="hidden" name="nomExpediteur" value="${echapperHTML(nomExpediteur)}">
         <input type="hidden" name="nomCompteAlipay" value="${nomCompteAlipay || ""}">
         <input type="hidden" name="telephoneCompteAlipay" value="${telephoneCompteAlipay || ""}">
         <label style="display:flex; align-items:flex-start; gap:8px; text-transform:none; font-weight:400; color:var(--texte-att); margin-top:14px; font-size:13px;">
@@ -2718,8 +2875,8 @@ app.get("/admin/utilisateurs", exigerAdmin, (req, res) => {
       ? `<a href="${lienPiece}" target="_blank">📄 PDF</a>`
       : `<a href="${lienPiece}" target="_blank"><img class="miniature" src="${lienPiece}"></a>`;
     const infos = u.nom
-      ? `${u.prenom} ${u.nom}<br><small style="color:var(--texte-att);">${u.telephone}</small>`
-      : `<em>${u.pseudo} (profil incomplet)</em>`;
+      ? `${echapperHTML(u.prenom)} ${echapperHTML(u.nom)}<br><small style="color:var(--texte-att);">${echapperHTML(u.telephone)}</small>`
+      : `<em>${echapperHTML(u.pseudo)} (profil incomplet)</em>`;
     const actions = u.compteSupprime
       ? `<form style="display:inline" method="POST" action="/admin/utilisateurs/${u.id}/reactiver"><button class="mini-bouton ok">Réactiver</button></form>
          <a class="mini-bouton refus" style="text-decoration:none; display:inline-block;" href="/admin/utilisateurs/${u.id}/supprimer-definitivement">Supprimer définitivement</a>`
@@ -2730,7 +2887,7 @@ app.get("/admin/utilisateurs", exigerAdmin, (req, res) => {
     const badgeStatut = u.compteSupprime
       ? `<span class="badge badge-refuse">Compte supprimé</span>`
       : `<span class="badge badge-${u.statutVerification === "verifie" ? "verifie" : u.statutVerification === "refuse" ? "refuse" : "attente"}">${u.statutVerification.replace(/_/g, " ")}</span>`;
-    return `<tr${u.compteSupprime ? ' style="opacity:0.55;"' : ""}><td>${image}</td><td>${u.identifiant}</td><td>${infos}</td><td>${badgeStatut}</td><td>${actions}</td></tr>`;
+    return `<tr${u.compteSupprime ? ' style="opacity:0.55;"' : ""}><td>${image}</td><td>${echapperHTML(u.identifiant)}</td><td>${infos}</td><td>${badgeStatut}</td><td>${actions}</td></tr>`;
   }).join("");
 
   const contenu = `
@@ -2786,7 +2943,7 @@ app.get("/admin/utilisateurs/:id/supprimer-definitivement", exigerAdmin, (req, r
   const contenu = `
     <h1>Supprimer définitivement ce compte</h1>
     <div class="banniere banniere-erreur">
-      Cette action est <b>définitive et irréversible</b>. Le compte ${u.identifiant}, ainsi que ${nbTransactions} transaction(s) et ${nbNotifications} notification(s) associées, seront effacés de la base de données pour toujours.
+      Cette action est <b>définitive et irréversible</b>. Le compte ${echapperHTML(u.identifiant)}, ainsi que ${nbTransactions} transaction(s) et ${nbNotifications} notification(s) associées, seront effacés de la base de données pour toujours.
     </div>
     <form method="POST" action="/admin/utilisateurs/${u.id}/supprimer-definitivement">
       <button type="submit" class="danger">Oui, tout supprimer définitivement</button>
@@ -2835,7 +2992,7 @@ app.get("/admin/transactions", exigerAdmin, (req, res) => {
     } else if (t.statut === "annule") {
       actions = `<span style="font-size:12px; color:var(--texte-att);">${t.raisonAnnulation || "—"}</span>`;
     }
-    return `<tr><td>${imgAlipay}</td><td>${t.reference}</td><td>${t.identifiantUtilisateur}</td><td>${t.total.toLocaleString("fr-FR")} XOF</td><td>${t.montantRMB} RMB</td><td>${t.nomCompteAlipay || "—"}<br><small>${t.telephoneCompteAlipay || ""}</small></td><td>${t.nomExpediteur || "—"}<br><small>${t.numeroExpediteur || "—"}</small></td><td>${imgPreuve}</td><td>${heurePreuve}</td><td>${CONFIG.PAIEMENT[t.moyenPaiement]?.nom || "—"}</td><td>${t.statut}</td><td>${fiche}</td><td>${actions}</td></tr>`;
+    return `<tr><td>${imgAlipay}</td><td>${t.reference}</td><td>${echapperHTML(t.identifiantUtilisateur)}</td><td>${t.total.toLocaleString("fr-FR")} XOF</td><td>${t.montantRMB} RMB</td><td>${echapperHTML(t.nomCompteAlipay) || "—"}<br><small>${echapperHTML(t.telephoneCompteAlipay)}</small></td><td>${echapperHTML(t.nomExpediteur) || "—"}<br><small>${echapperHTML(t.numeroExpediteur) || "—"}</small></td><td>${imgPreuve}</td><td>${heurePreuve}</td><td>${CONFIG.PAIEMENT[t.moyenPaiement]?.nom || "—"}</td><td>${t.statut}</td><td>${fiche}</td><td>${actions}</td></tr>`;
   }).join("");
 
   const totalRMB = listeFiltree.reduce((s, t) => s + t.montantRMB, 0);
