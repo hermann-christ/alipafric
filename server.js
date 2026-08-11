@@ -147,8 +147,8 @@ const CONFIG = {
   // Grille tarifaire par palier : plus le client commande, plus le taux est
   // avantageux. "seuilMax" = montant RMB maximum pour bénéficier de ce taux.
   PALIERS_TAUX: [
-    { seuilMax: 999.99, taux: 96 },
-    { seuilMax: Infinity, taux: 94 },
+    { seuilMax: 999.99, taux: 95 },
+    { seuilMax: Infinity, taux: 93 },
   ],
   MONTANT_MIN_RMB: 100,
   MONTANT_MAX_RMB: 20000,
