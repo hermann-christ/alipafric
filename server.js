@@ -1275,7 +1275,7 @@ app.get("/blog/recharger-alipay-depuis-le-togo", (req, res) => {
       <a class="bouton jaune" href="/inscription#formulaire">Créer mon compte et recharger mon Alipay</a>
     </article>
   `;
-  res.send(page("Comment recharger Alipay depuis le Togo", contenu, {
+  res.send(page("Comment recharger Alipay depuis l'Afrique", contenu, {
     indexable: true,
     urlCanonique: "/blog/recharger-alipay-depuis-le-togo",
     description: "Guide complet pour recharger votre compte Alipay en RMB depuis le Togo : étapes, vérification du compte, tarifs et questions fréquentes.",
