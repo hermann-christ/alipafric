@@ -1,5 +1,5 @@
 // ============================================================================
-//  ALIPAFRIC — Recharge Alipay depuis le Togo (F CFA -> RMB)
+//  ALIPAFRIC — Recharge Alipay depuis l'Afrique (F CFA -> RMB)
 //  ----------------------------------------------------------------------
 //  Design inspiré d'une maquette fournie : thème sombre, accents bleu/jaune.
 //  Toujours ultra léger : Express + fichiers JSON locaux + PDFKit.
@@ -138,7 +138,7 @@ const CONFIG = {
   NOM_SITE: "AlipAfric",
   TAGLINE: "RECHARGE. SIMPLIFIÉ.",
   URL_SITE: process.env.URL_SITE || "https://alipafric.onrender.com",
-  DESCRIPTION_SITE: "Rechargez votre compte Alipay en RMB depuis le Togo et l'Afrique de l'Ouest. Envoyez vos F CFA, recevez vos Yuans rapidement et en toute sécurité.",
+  DESCRIPTION_SITE: "Rechargez votre compte Alipay en RMB depuis l'Afrique. Envoyez vos F CFA, recevez vos Yuans rapidement et en toute sécurité.",
   // Liens temporaires en attendant les vraies pages/publications — à
   // remplacer ici une fois prêts, ça se répercute automatiquement partout.
   LIEN_FACEBOOK: "https://www.facebook.com/share/p/14ggpRnyQcg/",
@@ -1249,11 +1249,11 @@ app.get("/blog/recharger-alipay-depuis-le-togo", (req, res) => {
       </a>
     </header>
     <article class="carte">
-      <h1>Comment recharger son compte Alipay depuis le Togo (guide 2026)</h1>
-      <p class="souligne">Vous importez depuis la Chine (Alibaba, 1688, Taobao) ou vous voyagez bientôt là-bas ? Voici comment créditer votre compte Alipay en Yuans (RMB) depuis le Togo, en toute sécurité.</p>
+      <h1>Comment recharger son compte Alipay depuis l'Afrique (guide 2026)</h1>
+      <p class="souligne">Vous importez depuis la Chine (Alibaba, 1688, Taobao) ou vous voyagez bientôt là-bas ? Voici comment créditer votre compte Alipay en Yuans (RMB) depuis l'Afrique, en toute sécurité.</p>
 
       <h2>Pourquoi c'est difficile de recharger Alipay directement depuis l'Afrique</h2>
-      <p style="color:var(--texte-att); font-size:14px; line-height:1.7; margin-bottom:16px;">Alipay est une plateforme chinoise : elle n'accepte pas directement les cartes bancaires ou le Mobile Money émis en Afrique de l'Ouest. Pour créditer un compte Alipay depuis le Togo, il faut passer par un intermédiaire qui reçoit vos F CFA localement et transfère l'équivalent en RMB sur votre compte Alipay.</p>
+      <p style="color:var(--texte-att); font-size:14px; line-height:1.7; margin-bottom:16px;">Alipay est une plateforme chinoise : elle n'accepte pas directement les cartes bancaires ou le Mobile Money émis en Afrique. Pour créditer un compte Alipay depuis l'Afrique, il faut passer par un intermédiaire qui reçoit vos F CFA localement et transfère l'équivalent en RMB sur votre compte Alipay.</p>
 
       <h2>Les 3 étapes pour recharger votre Alipay avec ${CONFIG.NOM_SITE}</h2>
       <div class="etape-carte"><div class="etape-numero">1</div><div class="etape-texte"><b>Créez votre compte et faites vérifier votre identité</b><span>Une pièce d'identité valide est nécessaire avant toute première recharge, pour la sécurité de tous.</span></div></div>
@@ -1277,8 +1277,8 @@ app.get("/blog/recharger-alipay-depuis-le-togo", (req, res) => {
   `;
   res.send(page("Comment recharger Alipay depuis l'Afrique", contenu, {
     indexable: true,
-    urlCanonique: "/blog/recharger-alipay-depuis-l'Afrique",
-    description: "Guide complet pour recharger votre compte Alipay en RMB depuis le Togo : étapes, vérification du compte, tarifs et questions fréquentes.",
+    urlCanonique: "/blog/recharger-alipay-depuis-le-togo",
+    description: "Guide complet pour recharger votre compte Alipay en RMB depuis l'Afrique : étapes, vérification du compte, tarifs et questions fréquentes.",
   }));
 });
 
@@ -2986,7 +2986,7 @@ app.get("/admin/transactions", exigerAdmin, (req, res) => {
     let actions = "";
     if (t.statut === "preuve_recue") {
       actions = `<form style="display:inline" method="POST" action="/admin/transactions/${t.reference}/confirmer-paiement"><button class="mini-bouton info">Confirmer</button></form>
-                 <form style="display:inline" method="POST" action="/admin/transactions/${t.reference}/annuler-paiement"><button class="mini-bouton refus">Annuler</button></form>`;
+                 <form style="display:inline" method="POST" action="/admin/transactions/${t.reference}/annuler-paiement" onsubmit="const r=prompt('Raison de l\\'annulation (visible par le client) :'); if(!r) return false; this.querySelector('[name=raison]').value=r;"><input type="hidden" name="raison"><button class="mini-bouton refus">Annuler</button></form>`;
     } else if (t.statut === "paye") {
       actions = `<form method="POST" action="/admin/transactions/${t.reference}/confirmer-recharge"><button class="mini-bouton ok">Confirmer recharge Alipay</button></form>`;
     } else if (t.statut === "annule") {
@@ -3066,12 +3066,18 @@ app.post("/admin/transactions/:reference/confirmer-paiement", exigerAdmin, async
 app.post("/admin/transactions/:reference/annuler-paiement", exigerAdmin, (req, res) => {
   const t = transactions.find((x) => x.reference === req.params.reference);
   if (t && t.statut === "preuve_recue") {
+    const raisonSaisie = (req.body.raison || "").trim();
     t.statut = "annule";
-    t.raisonAnnulation = MESSAGE_PAIEMENT_ANNULE;
+    t.raisonAnnulation = raisonSaisie ? echapperHTML(raisonSaisie) : MESSAGE_PAIEMENT_ANNULE;
     t.dateAnnulation = new Date().toISOString();
     sauvegarderJSON(FICHIER_TRANSACTIONS, transactions);
-    ajouterNotification(t.utilisateurId, `Votre paiement pour la référence ${t.reference} a été annulé. Contactez le support pour plus d'informations.`, t.reference);
-    envoyerNotificationPushClient(t.utilisateurId, "Paiement annulé", `Votre paiement pour la référence ${t.reference} a été annulé. Contactez le support.`, `/compte/transactions/${t.reference}`).catch(() => {});
+    ajouterNotification(t.utilisateurId, `Votre paiement pour la référence ${t.reference} a été annulé : ${t.raisonAnnulation}`, t.reference);
+    envoyerNotificationPushClient(t.utilisateurId, "Paiement annulé", t.raisonAnnulation, `/compte/transactions/${t.reference}`).catch(() => {});
+    envoyerEmailTransaction(
+      t.identifiantUtilisateur,
+      `Paiement annulé — Commande ${t.reference}`,
+      `Votre paiement pour la commande <b>${t.reference}</b> (${t.montantRMB} RMB) a été annulé.<br><br><b>Raison :</b> ${t.raisonAnnulation}<br><br>Pour toute question, contactez-nous par e-mail ou sur WhatsApp.`
+    ).catch((err) => console.error("Erreur e-mail annulation :", err.message));
   }
   res.redirect("/admin/transactions");
 });
