@@ -1277,7 +1277,7 @@ app.get("/blog/recharger-alipay-depuis-le-togo", (req, res) => {
   `;
   res.send(page("Comment recharger Alipay depuis l'Afrique", contenu, {
     indexable: true,
-    urlCanonique: "/blog/recharger-alipay-depuis-le-togo",
+    urlCanonique: "/blog/recharger-alipay-depuis-l'Afrique",
     description: "Guide complet pour recharger votre compte Alipay en RMB depuis le Togo : étapes, vérification du compte, tarifs et questions fréquentes.",
   }));
 });
@@ -1383,7 +1383,7 @@ app.get("/", (req, res) => {
       <div class="pilier"><div class="icone">🎧</div><b>Support 24/7</b></div>
     </div>
 
-    <div class="pied-page">© ${new Date().getFullYear()} ${CONFIG.NOM_SITE}. Tous droits réservés. — <a href="/blog/recharger-alipay-depuis-le-togo" style="color:var(--texte-att);">Guide : recharger Alipay depuis le Togo</a></div>
+    <div class="pied-page">© ${new Date().getFullYear()} ${CONFIG.NOM_SITE}. Tous droits réservés. — <a href="/blog/recharger-alipay-depuis-le-togo" style="color:var(--texte-att);">Guide : recharger Alipay depuis l'Afrique</a></div>
   `;
   res.send(page("Recharge Alipay depuis l'Afrique", contenu, {
     indexable: true,
