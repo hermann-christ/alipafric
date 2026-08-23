@@ -1408,7 +1408,6 @@ function pageInscription({ email = "", nomComplet = "", pseudo = "", erreurMdp =
   const contenu = `
     ${enTeteEtHero()}
     <h1 id="formulaire">Créer un compte</h1>
-    <p class="souligne">Un code de confirmation sera affiché juste après l'inscription.</p>
     ${erreurGlobal ? `<div class="banniere banniere-erreur">${erreurGlobal}</div>` : ""}
     <div class="carte">
       <form method="POST" action="/inscription">
@@ -2874,9 +2873,9 @@ app.get("/admin/utilisateurs", exigerAdmin, (req, res) => {
     const image = !u.pieceIdentite ? "—" : estPdf
       ? `<a href="${lienPiece}" target="_blank">📄 PDF</a>`
       : `<a href="${lienPiece}" target="_blank"><img class="miniature" src="${lienPiece}"></a>`;
-    const infos = u.nom
+    const infos = u.statutVerification === "verifie"
       ? `${echapperHTML(u.prenom)} ${echapperHTML(u.nom)}<br><small style="color:var(--texte-att);">${echapperHTML(u.telephone)}</small>`
-      : `<em>${echapperHTML(u.pseudo)} (profil incomplet)</em>`;
+      : `<em>${echapperHTML(u.pseudo)}</em>`;
     const actions = u.compteSupprime
       ? `<form style="display:inline" method="POST" action="/admin/utilisateurs/${u.id}/reactiver"><button class="mini-bouton ok">Réactiver</button></form>
          <a class="mini-bouton refus" style="text-decoration:none; display:inline-block;" href="/admin/utilisateurs/${u.id}/supprimer-definitivement">Supprimer définitivement</a>`
