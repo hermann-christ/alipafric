@@ -2886,14 +2886,18 @@ app.get("/admin/utilisateurs", exigerAdmin, (req, res) => {
     const badgeStatut = u.compteSupprime
       ? `<span class="badge badge-refuse">Compte supprimé</span>`
       : `<span class="badge badge-${u.statutVerification === "verifie" ? "verifie" : u.statutVerification === "refuse" ? "refuse" : "attente"}">${u.statutVerification.replace(/_/g, " ")}</span>`;
-    return `<tr${u.compteSupprime ? ' style="opacity:0.55;"' : ""}><td>${image}</td><td>${echapperHTML(u.identifiant)}</td><td>${infos}</td><td>${badgeStatut}</td><td>${actions}</td></tr>`;
+    const formaterDate = (iso) => iso ? new Date(iso).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric" }) : "—";
+    const dates = u.dateVerification
+      ? `<small>Confirmé le<br>${formaterDate(u.dateVerification)}</small>`
+      : `<small>Inscrit le<br>${formaterDate(u.dateInscription)}</small>`;
+    return `<tr${u.compteSupprime ? ' style="opacity:0.55;"' : ""}><td>${image}</td><td>${echapperHTML(u.identifiant)}</td><td>${infos}</td><td>${dates}</td><td>${badgeStatut}</td><td>${actions}</td></tr>`;
   }).join("");
 
   const contenu = `
     <div class="nav-admin"><a href="/admin">← Accueil admin</a><a href="/admin/transactions">Transactions</a></div>
     <h1>Comptes clients</h1>
     <p class="souligne">Les comptes supprimés par leurs propriétaires restent visibles ici (accès révoqué mais données archivées).</p>
-    ${utilisateurs.length === 0 ? `<p class="aucune-donnee">Aucun compte.</p>` : `<table class="admin"><thead><tr><th>Pièce</th><th>E-mail</th><th>Infos</th><th>Statut</th><th>Action</th></tr></thead><tbody>${lignes}</tbody></table>`}
+    ${utilisateurs.length === 0 ? `<p class="aucune-donnee">Aucun compte.</p>` : `<table class="admin"><thead><tr><th>Pièce</th><th>E-mail</th><th>Infos</th><th>Date</th><th>Statut</th><th>Action</th></tr></thead><tbody>${lignes}</tbody></table>`}
   `;
   res.send(page("Comptes clients", contenu, { large: true, admin: true }));
 });
@@ -2901,6 +2905,7 @@ app.post("/admin/utilisateurs/:id/verifier", exigerAdmin, (req, res) => {
   const u = utilisateurs.find((x) => x.id === req.params.id);
   if (u) {
     u.statutVerification = "verifie";
+    u.dateVerification = new Date().toISOString();
     sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
     envoyerEmail(
       u.identifiant,
