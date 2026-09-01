@@ -2873,7 +2873,7 @@ app.get("/admin/utilisateurs", exigerAdmin, (req, res) => {
     const image = !u.pieceIdentite ? "—" : estPdf
       ? `<a href="${lienPiece}" target="_blank">📄 PDF</a>`
       : `<a href="${lienPiece}" target="_blank"><img class="miniature" src="${lienPiece}"></a>`;
-    const infos = u.statutVerification === "verifie"
+    const infos = u.telephone
       ? `${echapperHTML(u.prenom)} ${echapperHTML(u.nom)}<br><small style="color:var(--texte-att);">${echapperHTML(u.telephone)}</small>`
       : `<em>${echapperHTML(u.pseudo)}</em>`;
     const actions = u.compteSupprime
@@ -2887,8 +2887,8 @@ app.get("/admin/utilisateurs", exigerAdmin, (req, res) => {
       ? `<span class="badge badge-refuse">Compte supprimé</span>`
       : `<span class="badge badge-${u.statutVerification === "verifie" ? "verifie" : u.statutVerification === "refuse" ? "refuse" : "attente"}">${u.statutVerification.replace(/_/g, " ")}</span>`;
     const formaterDate = (iso) => iso ? new Date(iso).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric" }) : "—";
-    const dates = u.dateVerification
-      ? `<small>Confirmé le<br>${formaterDate(u.dateVerification)}</small>`
+    const dates = u.statutVerification === "verifie"
+      ? `<small>Confirmé le<br>${u.dateVerification ? formaterDate(u.dateVerification) : "(date inconnue)"}</small>`
       : `<small>Inscrit le<br>${formaterDate(u.dateInscription)}</small>`;
     return `<tr${u.compteSupprime ? ' style="opacity:0.55;"' : ""}><td>${image}</td><td>${echapperHTML(u.identifiant)}</td><td>${infos}</td><td>${dates}</td><td>${badgeStatut}</td><td>${actions}</td></tr>`;
   }).join("");
