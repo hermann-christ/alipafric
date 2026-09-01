@@ -750,14 +750,15 @@ function creerUpload(dossierDestination, typesAutorises, tailleMaxOctets) {
     limits: { fileSize: tailleMaxOctets },
     fileFilter: (req, file, cb) => {
       if (!typesAutorises || typesAutorises.includes(file.mimetype)) return cb(null, true);
-      cb(new Error("Format non autorisé. Utilisez JPG, JPEG, PNG ou PDF."));
+      const extensionsLisibles = (typesAutorises || []).map((t) => t.split("/")[1].toUpperCase()).join(", ");
+      cb(new Error(`Format non autorisé. Utilisez ${extensionsLisibles}.`));
     },
   });
 }
 const uploadAlipay = creerUpload(DOSSIER_UPLOADS_ALIPAY, ["image/jpeg", "image/png", "image/jpg"], 2 * 1024 * 1024);
 const uploadIdentite = creerUpload(
   DOSSIER_UPLOADS_IDENTITE,
-  ["image/jpeg", "image/png", "image/jpg", "application/pdf"],
+  ["image/jpeg", "image/png", "image/jpg"],
   2 * 1024 * 1024
 );
 const uploadPreuve = creerUpload(
@@ -1884,9 +1885,9 @@ app.get("/compte/profil", exigerConnexion, exigerEmailVerifie, (req, res) => {
             <input type="text" id="champTelephone" name="numeroTelephone" placeholder="Sélectionnez d'abord un pays" inputmode="numeric" oninput="this.value=this.value.replace(/\D/g,'').slice(0,this.maxLength||20)" required disabled>
           </div>
 
-          <label for="pieceIdentite">Pièce d'identité (JPG, JPEG, PNG ou PDF — max 2 Mo)</label>
+          <label for="pieceIdentite">Pièce d'identité (JPG, JPEG ou PNG — max 2 Mo)</label>
           <div class="zone-fichier">
-            <input type="file" id="pieceIdentite" name="pieceIdentite" accept=".jpg,.jpeg,.png,.pdf" required>
+            <input type="file" id="pieceIdentite" name="pieceIdentite" accept=".jpg,.jpeg,.png" required>
             <p class="indice">Document lisible et complet</p>
           </div>
           <button type="submit">Envoyer pour vérification</button>
@@ -2881,7 +2882,7 @@ app.get("/admin/utilisateurs", exigerAdmin, (req, res) => {
          <a class="mini-bouton refus" style="text-decoration:none; display:inline-block;" href="/admin/utilisateurs/${u.id}/supprimer-definitivement">Supprimer définitivement</a>`
       : u.statutVerification === "en_attente"
       ? `<form style="display:inline" method="POST" action="/admin/utilisateurs/${u.id}/verifier"><button class="mini-bouton ok">Vérifier</button></form>
-         <form style="display:inline" method="POST" action="/admin/utilisateurs/${u.id}/refuser"><button class="mini-bouton refus">Refuser</button></form>`
+         <form style="display:inline" method="POST" action="/admin/utilisateurs/${u.id}/refuser" onsubmit="const r=prompt('Raison du refus (visible par le client) :'); if(!r) return false; this.querySelector('[name=raison]').value=r;"><input type="hidden" name="raison"><button class="mini-bouton refus">Refuser</button></form>`
       : "";
     const badgeStatut = u.compteSupprime
       ? `<span class="badge badge-refuse">Compte supprimé</span>`
@@ -2917,7 +2918,17 @@ app.post("/admin/utilisateurs/:id/verifier", exigerAdmin, (req, res) => {
 });
 app.post("/admin/utilisateurs/:id/refuser", exigerAdmin, (req, res) => {
   const u = utilisateurs.find((x) => x.id === req.params.id);
-  if (u) { u.statutVerification = "refuse"; u.raisonRefus = MESSAGE_REFUS_IDENTITE; sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs); }
+  if (u) {
+    const raisonSaisie = (req.body.raison || "").trim();
+    u.statutVerification = "refuse";
+    u.raisonRefus = raisonSaisie ? echapperHTML(raisonSaisie) : MESSAGE_REFUS_IDENTITE;
+    sauvegarderJSON(FICHIER_UTILISATEURS, utilisateurs);
+    envoyerEmail(
+      u.identifiant,
+      `${CONFIG.NOM_SITE} — vérification d'identité refusée`,
+      `<p>Bonjour ${u.prenom || u.pseudo},</p><p>Votre pièce d'identité n'a malheureusement pas pu être validée.</p><p><b>Raison :</b> ${u.raisonRefus}</p><p>Vous pouvez soumettre une nouvelle pièce depuis votre espace client, rubrique Profil.</p>`
+    ).catch((err) => console.error("Erreur e-mail refus identité :", err.message));
+  }
   res.redirect("/admin/utilisateurs");
 });
 // Réactivation manuelle d'un compte archivé, après contact du client avec le support.
